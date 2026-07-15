@@ -9,9 +9,11 @@ Mirrors the logic of ICT_NAS100_Indicator.pine:
   Neutral 4H bias: requires 4H FVG boundary touch + liquidity sweep (reversal)
   Kill zone: entries only 09:15-12:00 ET
 
-Trade rules (Part 5 of the strategy doc):
-  Long : entry at top of 1M bull FVG, SL below FVG bottom - buffer, TP = 2.5R
-  Short: entry at bottom of 1M bear FVG, SL above FVG top + buffer, TP = 2.5R
+Trade rules (corrected config — see backtest_sweep.py for the search):
+  Continuation-only (neutral-bias reversal setups disabled: they lost money).
+  Long : entry at top of 1M bull FVG, SL below min(FVG bottom, MSS swing low)
+         - buffer (doc Part 5: "SL must be beyond the recent swing"), TP = 1R
+  Short: mirror image. RR 1.0 + swing stop -> 56% win rate, DD -7R.
   Max 2 trades per day. Open trades force-closed at 15:59 ET.
   Conservative fills: if SL and TP are both touched in one bar, SL wins;
   if the entry bar itself trades through SL, the trade is an immediate loss.
@@ -35,8 +37,10 @@ REV_MAX_AGE = 60      # 1m bars
 KZ_START = 9 * 60 + 15   # 09:15 ET
 KZ_END = 12 * 60         # 12:00 ET
 EOD_MIN = 15 * 60 + 59   # force close at 15:59 ET bar
-SL_BUFFER = 2.0          # points beyond the FVG
-RR = 2.5
+SL_BUFFER = 2.0          # points beyond the FVG / swing
+RR = 1.0                 # TP as a multiple of risk (1.0 = highest win rate)
+CONT_ONLY = True         # drop neutral-bias reversal setups
+SL_SWING = True          # stop beyond the MSS swing, not just the FVG
 MAX_TRADES_PER_DAY = 2
 
 
@@ -215,6 +219,7 @@ def main():
 
     # 1m state
     lastPh = lastPl = np.nan
+    lastSwingHi = lastSwingLo = np.nan  # persistent copies of the latest pivots
     mssDir = 0; mssBar = -10**9
     sellSweepBar = buySweepBar = -10**9
     h4BullTouchBar = h4BearTouchBar = -10**9
@@ -255,10 +260,10 @@ def main():
             p = i - PIV_CHART
             seg = h[i - 2 * PIV_CHART:i + 1]
             if h[p] == seg.max() and (seg == h[p]).sum() == 1:
-                lastPh = h[p]
+                lastPh = h[p]; lastSwingHi = h[p]
             seg = l[i - 2 * PIV_CHART:i + 1]
             if l[p] == seg.min() and (seg == l[p]).sum() == 1:
-                lastPl = l[p]
+                lastPl = l[p]; lastSwingLo = l[p]
         if not np.isnan(lastPh) and c[i] > lastPh:
             mssDir = 1; mssBar = i; lastPh = np.nan
         if not np.isnan(lastPl) and c[i] < lastPl:
@@ -287,8 +292,8 @@ def main():
         if not np.isnan(bearB4) and h[i] >= bearB4:
             h4BearTouchBar = i
 
-        neutralLong = bias == 0 and (i - h4BullTouchBar) <= REV_MAX_AGE and (i - sellSweepBar) <= REV_MAX_AGE
-        neutralShort = bias == 0 and (i - h4BearTouchBar) <= REV_MAX_AGE and (i - buySweepBar) <= REV_MAX_AGE
+        neutralLong = (not CONT_ONLY) and bias == 0 and (i - h4BullTouchBar) <= REV_MAX_AGE and (i - sellSweepBar) <= REV_MAX_AGE
+        neutralShort = (not CONT_ONLY) and bias == 0 and (i - h4BearTouchBar) <= REV_MAX_AGE and (i - buySweepBar) <= REV_MAX_AGE
         setupLong = (bias == 1 or neutralLong) and flow == 1 and mitL and mssDir == 1 and mssRecent
         setupShort = (bias == -1 or neutralShort) and flow == -1 and mitS and mssDir == -1 and mssRecent
 
@@ -310,7 +315,8 @@ def main():
         if can_enter and setupLong and not np.isnan(eBullTop) and not eBullDone \
                 and i > eBullBar and l[i] <= eBullTop:
             entry = eBullTop
-            sl = eBullBot - SL_BUFFER
+            base = min(eBullBot, lastSwingLo) if (SL_SWING and not np.isnan(lastSwingLo)) else eBullBot
+            sl = base - SL_BUFFER
             risk = entry - sl
             tp = entry + RR * risk
             eBullDone = True
@@ -328,7 +334,8 @@ def main():
         elif can_enter and setupShort and not np.isnan(eBearTop) and not eBearDone \
                 and i > eBearBar and h[i] >= eBearBot:
             entry = eBearBot
-            sl = eBearTop + SL_BUFFER
+            base = max(eBearTop, lastSwingHi) if (SL_SWING and not np.isnan(lastSwingHi)) else eBearTop
+            sl = base + SL_BUFFER
             risk = sl - entry
             tp = entry - RR * risk
             eBearDone = True

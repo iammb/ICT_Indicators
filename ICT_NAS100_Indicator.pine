@@ -8,7 +8,7 @@
 //           neutral-bias reversal setups at the 4H FVG boundary.
 // Designed to run on a 1-minute NAS100 chart. HTF values update on the live HTF bar
 // (no lookahead). Signals are confluence reads, not automated trade advice.
-indicator("ICT NAS100 - Bias & Signals", "ICT NAS100", overlay = true, max_boxes_count = 250, max_labels_count = 100)
+indicator("ICT NAS100 - Bias & Signals", "ICT NAS100", overlay = true, max_boxes_count = 250, max_labels_count = 100, max_lines_count = 300)
 
 //------------------------------------------------------------------
 // Inputs
@@ -30,6 +30,13 @@ grpKZ = "Kill zone"
 useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ)
 kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
 showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
+
+grpTP = "Trade plan (backtested: RR 1.0 + swing stop = 56% win rate)"
+useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
+rrTarget = input.float(1.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
+swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
+slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
+showPlan = input.bool(true, "Draw entry / SL / TP on signal", group = grpTP)
 
 grpVis = "Visuals"
 showTable    = input.bool(true, "Show status table", group = grpVis)
@@ -181,10 +188,14 @@ phC = ta.pivothigh(high, pivChart, pivChart)
 plC = ta.pivotlow(low, pivChart, pivChart)
 var float lastPhC = na
 var float lastPlC = na
+var float swingHiVal = na
+var float swingLoVal = na
 if not na(phC)
     lastPhC := phC
+    swingHiVal := phC
 if not na(plC)
     lastPlC := plC
+    swingLoVal := plC
 var int mssDir = 0
 var int mssBar = na
 if not na(lastPhC) and close > lastPhC
@@ -232,8 +243,8 @@ bgcolor(showKZ and inKZ ? color.new(color.blue, 94) : na)
 //------------------------------------------------------------------
 // Setup alignment (Steps 1-4 of the flagship model)
 //------------------------------------------------------------------
-neutralLongCtx  = h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
-neutralShortCtx = h4Bias == 0 and h4BearTouchRecent and buySweepRecent
+neutralLongCtx  = useRev and h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
+neutralShortCtx = useRev and h4Bias == 0 and h4BearTouchRecent and buySweepRecent
 biasOkLong  = h4Bias == 1 or neutralLongCtx
 biasOkShort = h4Bias == -1 or neutralShortCtx
 flowOkLong  = m15Flow == 1
@@ -287,6 +298,22 @@ if longSignal
     eBullDone := true
 if shortSignal
     eBearDone := true
+
+// Entry / SL / TP plan drawn at the moment a signal fires
+if longSignal and showPlan
+    float slL = (swingSL and not na(swingLoVal) ? math.min(eBullBot, swingLoVal) : eBullBot) - slBuf
+    float tpL = eBullTop + rrTarget * (eBullTop - slL)
+    line.new(bar_index, eBullTop, bar_index + 30, eBullTop, color = color.gray, width = 1)
+    line.new(bar_index, slL, bar_index + 30, slL, color = color.red, width = 1)
+    line.new(bar_index, tpL, bar_index + 30, tpL, color = color.green, width = 1)
+    label.new(bar_index + 30, tpL, "TP " + str.tostring(tpL, format.mintick) + "\nE  " + str.tostring(eBullTop, format.mintick) + "\nSL " + str.tostring(slL, format.mintick), style = label.style_label_left, color = color.new(color.green, 70), textcolor = color.white, size = size.small)
+if shortSignal and showPlan
+    float slS = (swingSL and not na(swingHiVal) ? math.max(eBearTop, swingHiVal) : eBearTop) + slBuf
+    float tpS = eBearBot - rrTarget * (slS - eBearBot)
+    line.new(bar_index, eBearBot, bar_index + 30, eBearBot, color = color.gray, width = 1)
+    line.new(bar_index, slS, bar_index + 30, slS, color = color.red, width = 1)
+    line.new(bar_index, tpS, bar_index + 30, tpS, color = color.green, width = 1)
+    label.new(bar_index + 30, tpS, "TP " + str.tostring(tpS, format.mintick) + "\nE  " + str.tostring(eBearBot, format.mintick) + "\nSL " + str.tostring(slS, format.mintick), style = label.style_label_left, color = color.new(color.red, 70), textcolor = color.white, size = size.small)
 
 plotshape(longSignal, title = "BUY", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small, text = "BUY", textcolor = color.white)
 plotshape(shortSignal, title = "SELL", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small, text = "SELL", textcolor = color.white)
