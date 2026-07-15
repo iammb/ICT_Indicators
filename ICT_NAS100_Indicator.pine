@@ -1,0 +1,372 @@
+//@version=6
+// ICT NAS100 - Multi-Timeframe Bias & Entry Signals
+// Implements the top-down ICT model from ICT_NAS100_Complete_Strategy.md:
+//   4H  : FVG mitigation -> rejection -> MSS  => bias (Bullish / Bearish / Neutral)
+//   15M : order-flow direction + mitigation of the 15M FVG in the trade direction
+//   1M  : Market Structure Shift (non-negotiable) + 1M FVG as the entry trigger
+//   Extras: NY kill zone filter (09:15-12:00 ET), liquidity-sweep requirement for
+//           neutral-bias reversal setups at the 4H FVG boundary.
+// Designed to run on a 1-minute NAS100 chart. HTF values update on the live HTF bar
+// (no lookahead). Signals are confluence reads, not automated trade advice.
+indicator("ICT NAS100 - Bias & Signals", "ICT NAS100", overlay = true, max_boxes_count = 250, max_labels_count = 100)
+
+//------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------
+grpTF = "Timeframes"
+tfBias = input.timeframe("240", "Bias timeframe (4H)", group = grpTF)
+tfFlow = input.timeframe("15", "Order-flow timeframe (15M)", group = grpTF)
+
+grpST = "Structure & FVG"
+pivBias   = input.int(3, "4H swing pivot length", minval = 1, group = grpST)
+pivFlow   = input.int(3, "15M swing pivot length", minval = 1, group = grpST)
+pivChart  = input.int(3, "Chart (1M) swing pivot length", minval = 1, group = grpST)
+mssMaxAge = input.int(30, "Max chart bars since 1M MSS", minval = 1, group = grpST)
+mitMaxAge = input.int(40, "Max 15M bars since 15M FVG mitigation", minval = 1, group = grpST)
+sweepLen  = input.int(20, "Liquidity sweep lookback (chart bars)", minval = 2, group = grpST)
+revMaxAge = input.int(60, "Max chart bars since sweep / 4H touch (reversals)", minval = 1, group = grpST)
+
+grpKZ = "Kill zone"
+useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ)
+kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
+showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
+
+grpVis = "Visuals"
+showTable    = input.bool(true, "Show status table", group = grpVis)
+showEntryFvg = input.bool(true, "Draw 1M entry FVGs", group = grpVis)
+showZones    = input.bool(true, "Draw active 4H / 15M FVG zones", group = grpVis)
+
+//------------------------------------------------------------------
+// 4H bias engine: mitigation -> rejection -> MSS = confirmed bias
+//------------------------------------------------------------------
+biasEngine(int pivLen) =>
+    newBull = low > high[2]
+    newBear = high < low[2]
+    hh = ta.highest(high, pivLen * 2 + 1)
+    ll = ta.lowest(low, pivLen * 2 + 1)
+
+    var float bullTop = na
+    var float bullBot = na
+    var bool  bullMit = false
+    var bool  bullRej = false
+    var float bullTrig = na
+    var float bearTop = na
+    var float bearBot = na
+    var bool  bearMit = false
+    var bool  bearRej = false
+    var float bearTrig = na
+    var int   bias = 0
+
+    if newBull
+        bullTop := low
+        bullBot := high[2]
+        bullMit := false
+        bullRej := false
+        bullTrig := na
+    if newBear
+        bearTop := low[2]
+        bearBot := high
+        bearMit := false
+        bearRej := false
+        bearTrig := na
+
+    if not na(bullTop)
+        if close < bullBot
+            bullTop := na
+            bullBot := na
+            bullMit := false
+            bullRej := false
+            if bias == 1
+                bias := 0
+        else
+            if not bullMit and low <= bullTop
+                bullMit := true
+                bullTrig := hh[1]
+            if bullMit and not bullRej and close > bullTop
+                bullRej := true
+            if bullMit and bullRej and not na(bullTrig) and close > bullTrig
+                bias := 1
+
+    if not na(bearTop)
+        if close > bearTop
+            bearTop := na
+            bearBot := na
+            bearMit := false
+            bearRej := false
+            if bias == -1
+                bias := 0
+        else
+            if not bearMit and high >= bearBot
+                bearMit := true
+                bearTrig := ll[1]
+            if bearMit and not bearRej and close < bearBot
+                bearRej := true
+            if bearMit and bearRej and not na(bearTrig) and close < bearTrig
+                bias := -1
+
+    [bias, bullTop, bullBot, bearTop, bearBot]
+
+//------------------------------------------------------------------
+// 15M order-flow engine: MSS-based flow + FVG zones with mitigation age
+//------------------------------------------------------------------
+flowEngine(int pivLen) =>
+    ph = ta.pivothigh(high, pivLen, pivLen)
+    pl = ta.pivotlow(low, pivLen, pivLen)
+    var float lastPh = na
+    var float lastPl = na
+    if not na(ph)
+        lastPh := ph
+    if not na(pl)
+        lastPl := pl
+    var int flow = 0
+    if not na(lastPh) and close > lastPh
+        flow := 1
+        lastPh := na
+    if not na(lastPl) and close < lastPl
+        flow := -1
+        lastPl := na
+
+    newBull = low > high[2]
+    newBear = high < low[2]
+    var float bullTop = na
+    var float bullBot = na
+    var int   bullMitAge = -1
+    var float bearTop = na
+    var float bearBot = na
+    var int   bearMitAge = -1
+
+    if newBull
+        bullTop := low
+        bullBot := high[2]
+        bullMitAge := -1
+    if newBear
+        bearTop := low[2]
+        bearBot := high
+        bearMitAge := -1
+
+    if not na(bullTop)
+        if close < bullBot
+            bullTop := na
+            bullBot := na
+            bullMitAge := -1
+        else if bullMitAge < 0
+            if low <= bullTop
+                bullMitAge := 0
+        else
+            bullMitAge += 1
+
+    if not na(bearTop)
+        if close > bearTop
+            bearTop := na
+            bearBot := na
+            bearMitAge := -1
+        else if bearMitAge < 0
+            if high >= bearBot
+                bearMitAge := 0
+        else
+            bearMitAge += 1
+
+    [flow, bullTop, bullBot, bullMitAge, bearTop, bearBot, bearMitAge]
+
+//------------------------------------------------------------------
+// Higher-timeframe requests
+//------------------------------------------------------------------
+[h4Bias, h4BullTop, h4BullBot, h4BearTop, h4BearBot] = request.security(syminfo.tickerid, tfBias, biasEngine(pivBias))
+[m15Flow, m15BullTop, m15BullBot, m15BullMitAge, m15BearTop, m15BearBot, m15BearMitAge] = request.security(syminfo.tickerid, tfFlow, flowEngine(pivFlow))
+
+//------------------------------------------------------------------
+// Chart (1M) structure: Market Structure Shift
+//------------------------------------------------------------------
+phC = ta.pivothigh(high, pivChart, pivChart)
+plC = ta.pivotlow(low, pivChart, pivChart)
+var float lastPhC = na
+var float lastPlC = na
+if not na(phC)
+    lastPhC := phC
+if not na(plC)
+    lastPlC := plC
+var int mssDir = 0
+var int mssBar = na
+if not na(lastPhC) and close > lastPhC
+    mssDir := 1
+    mssBar := bar_index
+    lastPhC := na
+if not na(lastPlC) and close < lastPlC
+    mssDir := -1
+    mssBar := bar_index
+    lastPlC := na
+mssRecent = not na(mssBar) and bar_index - mssBar <= mssMaxAge
+
+//------------------------------------------------------------------
+// Liquidity sweeps + 4H FVG boundary touches (neutral-bias reversals)
+//------------------------------------------------------------------
+prevLo = ta.lowest(low, sweepLen)[1]
+prevHi = ta.highest(high, sweepLen)[1]
+sellSweep = low < prevLo and close > prevLo
+buySweep  = high > prevHi and close < prevHi
+var int sellSweepBar = na
+var int buySweepBar = na
+if sellSweep
+    sellSweepBar := bar_index
+if buySweep
+    buySweepBar := bar_index
+sellSweepRecent = not na(sellSweepBar) and bar_index - sellSweepBar <= revMaxAge
+buySweepRecent  = not na(buySweepBar) and bar_index - buySweepBar <= revMaxAge
+
+var int h4BullTouchBar = na
+var int h4BearTouchBar = na
+if not na(h4BullTop) and low <= h4BullTop
+    h4BullTouchBar := bar_index
+if not na(h4BearBot) and high >= h4BearBot
+    h4BearTouchBar := bar_index
+h4BullTouchRecent = not na(h4BullTouchBar) and bar_index - h4BullTouchBar <= revMaxAge
+h4BearTouchRecent = not na(h4BearTouchBar) and bar_index - h4BearTouchBar <= revMaxAge
+
+//------------------------------------------------------------------
+// Kill zone
+//------------------------------------------------------------------
+inKZ = not na(time(timeframe.period, kzSess, "America/New_York"))
+kzOk = not useKZ or inKZ
+bgcolor(showKZ and inKZ ? color.new(color.blue, 94) : na)
+
+//------------------------------------------------------------------
+// Setup alignment (Steps 1-4 of the flagship model)
+//------------------------------------------------------------------
+neutralLongCtx  = h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
+neutralShortCtx = h4Bias == 0 and h4BearTouchRecent and buySweepRecent
+biasOkLong  = h4Bias == 1 or neutralLongCtx
+biasOkShort = h4Bias == -1 or neutralShortCtx
+flowOkLong  = m15Flow == 1
+flowOkShort = m15Flow == -1
+mitOkLong   = m15BullMitAge >= 0 and m15BullMitAge <= mitMaxAge
+mitOkShort  = m15BearMitAge >= 0 and m15BearMitAge <= mitMaxAge
+setupLong  = biasOkLong and flowOkLong and mitOkLong and mssDir == 1 and mssRecent
+setupShort = biasOkShort and flowOkShort and mitOkShort and mssDir == -1 and mssRecent
+
+//------------------------------------------------------------------
+// 1M entry FVG (Step 5) + trigger on retrace into the zone
+//------------------------------------------------------------------
+newBullC = low > high[2]
+newBearC = high < low[2]
+var float eBullTop = na
+var float eBullBot = na
+var int   eBullBar = na
+var bool  eBullDone = false
+var float eBearTop = na
+var float eBearBot = na
+var int   eBearBar = na
+var bool  eBearDone = false
+
+if newBullC and setupLong
+    eBullTop := low
+    eBullBot := high[2]
+    eBullBar := bar_index
+    eBullDone := false
+    if showEntryFvg
+        box.new(bar_index - 2, low, bar_index + 20, high[2], border_color = color.new(color.teal, 35), bgcolor = color.new(color.teal, 85))
+if newBearC and setupShort
+    eBearTop := low[2]
+    eBearBot := high
+    eBearBar := bar_index
+    eBearDone := false
+    if showEntryFvg
+        box.new(bar_index - 2, low[2], bar_index + 20, high, border_color = color.new(color.red, 35), bgcolor = color.new(color.red, 85))
+
+if not na(eBullTop) and close < eBullBot
+    eBullTop := na
+    eBullBot := na
+if not na(eBearTop) and close > eBearTop
+    eBearTop := na
+    eBearBot := na
+
+armedLong  = setupLong and not na(eBullTop) and not eBullDone and kzOk
+armedShort = setupShort and not na(eBearTop) and not eBearDone and kzOk
+longSignal  = armedLong and bar_index > eBullBar and low <= eBullTop
+shortSignal = armedShort and bar_index > eBearBar and high >= eBearBot
+if longSignal
+    eBullDone := true
+if shortSignal
+    eBearDone := true
+
+plotshape(longSignal, title = "BUY", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small, text = "BUY", textcolor = color.white)
+plotshape(shortSignal, title = "SELL", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small, text = "SELL", textcolor = color.white)
+
+alertcondition(longSignal, "ICT Long Entry", "ICT NAS100: LONG - price tapped the 1M bullish FVG after MSS with 4H/15M alignment")
+alertcondition(shortSignal, "ICT Short Entry", "ICT NAS100: SHORT - price tapped the 1M bearish FVG after MSS with 4H/15M alignment")
+
+//------------------------------------------------------------------
+// Active HTF zone boxes (updated on the last bar only)
+//------------------------------------------------------------------
+zoneBox(box b, float top, float bot, color c, string txt) =>
+    box r = b
+    if na(top) or na(bot)
+        if not na(r)
+            box.delete(r)
+        r := na
+    else
+        left = math.max(bar_index - 60, 0)
+        if na(r)
+            r := box.new(left, top, bar_index + 10, bot, border_color = color.new(c, 40), bgcolor = color.new(c, 88), text = txt, text_color = color.new(c, 20), text_size = size.tiny, text_halign = text.align_left)
+        else
+            box.set_lefttop(r, left, top)
+            box.set_rightbottom(r, bar_index + 10, bot)
+    r
+
+var box bH4Bull  = na
+var box bH4Bear  = na
+var box bM15Bull = na
+var box bM15Bear = na
+if barstate.islast and showZones
+    bH4Bull := zoneBox(bH4Bull, h4BullTop, h4BullBot, color.green, "4H Bull FVG")
+    bH4Bear := zoneBox(bH4Bear, h4BearTop, h4BearBot, color.red, "4H Bear FVG")
+    bM15Bull := zoneBox(bM15Bull, m15BullTop, m15BullBot, color.teal, "15M Bull FVG")
+    bM15Bear := zoneBox(bM15Bear, m15BearTop, m15BearBot, color.orange, "15M Bear FVG")
+
+//------------------------------------------------------------------
+// Status table (top right)
+//------------------------------------------------------------------
+var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1, border_color = color.new(color.gray, 60), border_width = 1)
+
+cBull = color.new(color.green, 0)
+cBear = color.new(color.red, 0)
+cMut  = color.new(color.gray, 0)
+
+if showTable and barstate.islast
+    biasTxt = h4Bias == 1 ? "Bullish" : h4Bias == -1 ? "Bearish" : "Neutral"
+    biasCol = h4Bias == 1 ? cBull : h4Bias == -1 ? cBear : cMut
+    flowTxt = m15Flow == 1 ? "Bullish" : m15Flow == -1 ? "Bearish" : "-"
+    flowCol = m15Flow == 1 ? cBull : m15Flow == -1 ? cBear : cMut
+    mitTxt = mitOkLong and mitOkShort ? "Bull+Bear" : mitOkLong ? "Bull FVG hit" : mitOkShort ? "Bear FVG hit" : "No"
+    mitCol = mitOkLong and not mitOkShort ? cBull : mitOkShort and not mitOkLong ? cBear : cMut
+    mssTxt = mssRecent and mssDir == 1 ? "Bullish" : mssRecent and mssDir == -1 ? "Bearish" : "-"
+    mssCol = mssRecent and mssDir == 1 ? cBull : mssRecent and mssDir == -1 ? cBear : cMut
+    fvgTxt = not na(eBullTop) and not eBullDone ? "Bull armed" : not na(eBearTop) and not eBearDone ? "Bear armed" : "-"
+    fvgCol = not na(eBullTop) and not eBullDone ? cBull : not na(eBearTop) and not eBearDone ? cBear : cMut
+    kzTxt = inKZ ? "ACTIVE" : "Closed"
+    kzCol = inKZ ? cBull : cMut
+    entryTxt = armedLong or longSignal ? "Long" : armedShort or shortSignal ? "Short" : "Wait"
+    entryCol = armedLong or longSignal ? cBull : armedShort or shortSignal ? cBear : cMut
+    typeTxt = armedLong or longSignal ? (h4Bias == 1 ? "Continuation" : "Reversal") : armedShort or shortSignal ? (h4Bias == -1 ? "Continuation" : "Reversal") : "-"
+    sigTxt = longSignal ? "LONG NOW" : shortSignal ? "SHORT NOW" : armedLong ? "LONG SETUP" : armedShort ? "SHORT SETUP" : "WAIT"
+    sigBg = longSignal or armedLong ? color.new(color.green, 25) : shortSignal or armedShort ? color.new(color.red, 25) : color.new(color.gray, 55)
+
+    table.cell(tb, 0, 0, "ICT NAS100", text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 25))
+    table.cell(tb, 1, 0, "TF " + timeframe.period, text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 25))
+    table.cell(tb, 0, 1, "4H Bias", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 1, biasTxt, text_color = biasCol, text_size = size.small)
+    table.cell(tb, 0, 2, "15M Flow", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 2, flowTxt, text_color = flowCol, text_size = size.small)
+    table.cell(tb, 0, 3, "15M FVG Mit", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 3, mitTxt, text_color = mitCol, text_size = size.small)
+    table.cell(tb, 0, 4, "1M MSS", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 4, mssTxt, text_color = mssCol, text_size = size.small)
+    table.cell(tb, 0, 5, "1M Entry FVG", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 5, fvgTxt, text_color = fvgCol, text_size = size.small)
+    table.cell(tb, 0, 6, "Kill Zone", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 6, kzTxt, text_color = kzCol, text_size = size.small)
+    table.cell(tb, 0, 7, "1M Entry", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 7, entryTxt, text_color = entryCol, text_size = size.small)
+    table.cell(tb, 0, 8, "Trade Type", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 8, typeTxt, text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 9, "SIGNAL", text_color = color.white, text_size = size.small, bgcolor = sigBg)
+    table.cell(tb, 1, 9, sigTxt, text_color = color.white, text_size = size.small, bgcolor = sigBg)
