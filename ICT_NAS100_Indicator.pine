@@ -31,8 +31,10 @@ useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ
 kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
 showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
 
-grpTP = "Trade plan (backtested: RR 2.0 + swing stop, ~41% win rate)"
+grpTP = "Trade plan (backtested: sweep + RR 2.0 + swing stop, PF 1.53)"
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
+sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
+dispMult = input.float(0.0, "Min displacement body (x ATR14, 0 = off)", minval = 0, step = 0.25, group = grpTP)
 rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
 slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
@@ -251,14 +253,16 @@ flowOkLong  = m15Flow == 1
 flowOkShort = m15Flow == -1
 mitOkLong   = m15BullMitAge >= 0 and m15BullMitAge <= mitMaxAge
 mitOkShort  = m15BearMitAge >= 0 and m15BearMitAge <= mitMaxAge
-setupLong  = biasOkLong and flowOkLong and mitOkLong and mssDir == 1 and mssRecent
-setupShort = biasOkShort and flowOkShort and mitOkShort and mssDir == -1 and mssRecent
+setupLong  = biasOkLong and flowOkLong and mitOkLong and mssDir == 1 and mssRecent and (not sweepAll or sellSweepRecent)
+setupShort = biasOkShort and flowOkShort and mitOkShort and mssDir == -1 and mssRecent and (not sweepAll or buySweepRecent)
 
 //------------------------------------------------------------------
 // 1M entry FVG (Step 5) + trigger on retrace into the zone
 //------------------------------------------------------------------
-newBullC = low > high[2]
-newBearC = high < low[2]
+atr14 = ta.atr(14)
+dispOK = dispMult <= 0 or math.abs(close[1] - open[1]) >= dispMult * atr14[1]
+newBullC = low > high[2] and dispOK
+newBearC = high < low[2] and dispOK
 var float eBullTop = na
 var float eBullBot = na
 var int   eBullBar = na

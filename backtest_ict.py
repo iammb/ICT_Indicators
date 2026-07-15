@@ -41,6 +41,7 @@ SL_BUFFER = 2.0          # points beyond the FVG / swing
 RR = 2.0                 # TP as a multiple of risk (1:2 reward-to-risk)
 CONT_ONLY = True         # drop neutral-bias reversal setups
 SL_SWING = True          # stop beyond the MSS swing, not just the FVG
+SWEEP_ALL = True         # ICT: liquidity sweep required before EVERY entry
 MAX_TRADES_PER_DAY = 2
 
 
@@ -296,6 +297,9 @@ def main():
         neutralShort = (not CONT_ONLY) and bias == 0 and (i - h4BearTouchBar) <= REV_MAX_AGE and (i - buySweepBar) <= REV_MAX_AGE
         setupLong = (bias == 1 or neutralLong) and flow == 1 and mitL and mssDir == 1 and mssRecent
         setupShort = (bias == -1 or neutralShort) and flow == -1 and mitS and mssDir == -1 and mssRecent
+        if SWEEP_ALL:
+            setupLong = setupLong and (i - sellSweepBar) <= REV_MAX_AGE
+            setupShort = setupShort and (i - buySweepBar) <= REV_MAX_AGE
 
         # ---- entry FVG registration ----
         if i >= 2:

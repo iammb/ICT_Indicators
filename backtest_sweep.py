@@ -36,6 +36,22 @@ def run(df, htf, cfg):
     be_1r = cfg.get("be_1r", False)
     min_fvg = cfg.get("min_fvg", 0.0)
     longs_only = cfg.get("longs_only", False)
+    disp_mult = cfg.get("disp_mult", 0.0)   # displacement: middle-candle body >= mult*ATR14
+    pd_len = cfg.get("pd_len", 0)           # premium/discount dealing range length (0 = off)
+    sweep_all = cfg.get("sweep_all", False) # require liquidity sweep before ALL entries
+    kz_start = cfg.get("kz_start", KZ_START)
+    kz_end = cfg.get("kz_end", KZ_END)
+
+    tr_ = np.maximum(h - l, np.maximum(abs(h - np.roll(c, 1)), abs(l - np.roll(c, 1))))
+    tr_[0] = h[0] - l[0]
+    atr = pd.Series(tr_).rolling(14).mean().to_numpy()
+    body = np.abs(c - o)
+    if pd_len > 0:
+        dealHi = pd.Series(h).rolling(pd_len).max().shift(1).to_numpy()
+        dealLo = pd.Series(l).rolling(pd_len).min().shift(1).to_numpy()
+        eqArr = (dealHi + dealLo) / 2.0
+    else:
+        eqArr = None
 
     lastPh = lastPl = np.nan
     lastSwingHi = lastSwingLo = np.nan   # most recent confirmed pivots (persistent)
@@ -118,18 +134,25 @@ def run(df, htf, cfg):
         setupShort = (bias == -1 or neutralShort) and flow == -1 and mitS and mssDir == -1 and mssRecent
         if longs_only:
             setupShort = False
+        if sweep_all:
+            setupLong = setupLong and (i - sellSweepBar) <= REV_MAX_AGE
+            setupShort = setupShort and (i - buySweepBar) <= REV_MAX_AGE
+        if eqArr is not None and not np.isnan(eqArr[i]):
+            setupLong = setupLong and c[i] <= eqArr[i]     # buy in discount only
+            setupShort = setupShort and c[i] >= eqArr[i]   # sell in premium only
 
         if i >= 2:
-            if l[i] > h[i - 2] and setupLong and (l[i] - h[i - 2]) >= min_fvg:
+            dispOK = disp_mult <= 0 or (not np.isnan(atr[i - 1]) and body[i - 1] >= disp_mult * atr[i - 1])
+            if l[i] > h[i - 2] and setupLong and (l[i] - h[i - 2]) >= min_fvg and dispOK:
                 eBullTop, eBullBot, eBullBar, eBullDone = l[i], h[i - 2], i, False
-            if h[i] < l[i - 2] and setupShort and (l[i - 2] - h[i]) >= min_fvg:
+            if h[i] < l[i - 2] and setupShort and (l[i - 2] - h[i]) >= min_fvg and dispOK:
                 eBearTop, eBearBot, eBearBar, eBearDone = l[i - 2], h[i], i, False
         if not np.isnan(eBullTop) and c[i] < eBullBot:
             eBullTop = eBullBot = np.nan
         if not np.isnan(eBearTop) and c[i] > eBearTop:
             eBearTop = eBearBot = np.nan
 
-        inKZ = KZ_START <= mins[i] < KZ_END
+        inKZ = kz_start <= mins[i] < kz_end
         can_enter = pos is None and inKZ and day_count < MAX_TRADES_PER_DAY
 
         if can_enter and setupLong and not np.isnan(eBullTop) and not eBullDone \
