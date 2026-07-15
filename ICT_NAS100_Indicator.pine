@@ -34,6 +34,7 @@ showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
 grpTP = "Trade plan (backtested: sweep + RR 2.0 + swing stop, PF 1.53)"
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
 sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
+neutralMode = input.string("4H structure", "When 4H bias is neutral", options = ["Stand aside", "4H structure", "15M flow"], group = grpTP, tooltip = "4H FVG bias is neutral ~40% of the time. '4H structure' falls back to plain 4H market structure direction; '15M flow' defers to the 15M order flow; 'Stand aside' takes no trades (strictest, highest PF).")
 dispMult = input.float(0.0, "Min displacement body (x ATR14, 0 = off)", minval = 0, step = 0.25, group = grpTP)
 rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
@@ -182,6 +183,7 @@ flowEngine(int pivLen) =>
 //------------------------------------------------------------------
 [h4Bias, h4BullTop, h4BullBot, h4BearTop, h4BearBot] = request.security(syminfo.tickerid, tfBias, biasEngine(pivBias))
 [m15Flow, m15BullTop, m15BullBot, m15BullMitAge, m15BearTop, m15BearBot, m15BearMitAge] = request.security(syminfo.tickerid, tfFlow, flowEngine(pivFlow))
+[h4Struct, hs1, hs2, hs3, hs4, hs5, hs6] = request.security(syminfo.tickerid, tfBias, flowEngine(pivBias))
 
 //------------------------------------------------------------------
 // Chart (1M) structure: Market Structure Shift
@@ -247,8 +249,10 @@ bgcolor(showKZ and inKZ ? color.new(color.blue, 94) : na)
 //------------------------------------------------------------------
 neutralLongCtx  = useRev and h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
 neutralShortCtx = useRev and h4Bias == 0 and h4BearTouchRecent and buySweepRecent
-biasOkLong  = h4Bias == 1 or neutralLongCtx
-biasOkShort = h4Bias == -1 or neutralShortCtx
+nFallLong  = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == 1 or neutralMode == "15M flow")
+nFallShort = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == -1 or neutralMode == "15M flow")
+biasOkLong  = h4Bias == 1 or neutralLongCtx or nFallLong
+biasOkShort = h4Bias == -1 or neutralShortCtx or nFallShort
 flowOkLong  = m15Flow == 1
 flowOkShort = m15Flow == -1
 mitOkLong   = m15BullMitAge >= 0 and m15BullMitAge <= mitMaxAge
@@ -363,8 +367,8 @@ cBear = color.new(color.red, 0)
 cMut  = color.new(color.gray, 0)
 
 if showTable and barstate.islast
-    biasTxt = h4Bias == 1 ? "Bullish" : h4Bias == -1 ? "Bearish" : "Neutral"
-    biasCol = h4Bias == 1 ? cBull : h4Bias == -1 ? cBear : cMut
+    biasTxt = h4Bias == 1 ? "Bullish" : h4Bias == -1 ? "Bearish" : nFallLong ? "Ntrl > Bull" : nFallShort ? "Ntrl > Bear" : "Neutral"
+    biasCol = h4Bias == 1 or nFallLong ? cBull : h4Bias == -1 or nFallShort ? cBear : cMut
     flowTxt = m15Flow == 1 ? "Bullish" : m15Flow == -1 ? "Bearish" : "-"
     flowCol = m15Flow == 1 ? cBull : m15Flow == -1 ? cBear : cMut
     mitTxt = mitOkLong and mitOkShort ? "Bull+Bear" : mitOkLong ? "Bull FVG hit" : mitOkShort ? "Bear FVG hit" : "No"
@@ -377,7 +381,7 @@ if showTable and barstate.islast
     kzCol = inKZ ? cBull : cMut
     entryTxt = armedLong or longSignal ? "Long" : armedShort or shortSignal ? "Short" : "Wait"
     entryCol = armedLong or longSignal ? cBull : armedShort or shortSignal ? cBear : cMut
-    typeTxt = armedLong or longSignal ? (h4Bias == 1 ? "Continuation" : "Reversal") : armedShort or shortSignal ? (h4Bias == -1 ? "Continuation" : "Reversal") : "-"
+    typeTxt = armedLong or longSignal ? (h4Bias == 1 or nFallLong ? "Continuation" : "Reversal") : armedShort or shortSignal ? (h4Bias == -1 or nFallShort ? "Continuation" : "Reversal") : "-"
     sigTxt = longSignal ? "LONG NOW" : shortSignal ? "SHORT NOW" : armedLong ? "LONG SETUP" : armedShort ? "SHORT SETUP" : "WAIT"
     sigBg = longSignal or armedLong ? color.new(color.green, 25) : shortSignal or armedShort ? color.new(color.red, 25) : color.new(color.gray, 55)
 

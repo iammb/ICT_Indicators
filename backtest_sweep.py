@@ -20,8 +20,10 @@ from backtest_ict import (load_data, resample, bias_engine, flow_engine,
                           MAX_TRADES_PER_DAY)
 
 
-def run(df, htf, cfg):
+def run(df, htf, cfg, h4flow=None):
     (h4bias, h4bT, h4sB, m15flow, m15bAge, m15sAge, idx4, idx15) = htf
+    neutral_flow = cfg.get("neutral_flow", False)   # neutral 4H: trade with 15M flow
+    h4_fallback = cfg.get("h4_fallback", False)     # neutral 4H: use 4H structure dir
     o = df["open"].to_numpy(); h = df["high"].to_numpy()
     l = df["low"].to_numpy(); c = df["close"].to_numpy()
     n = len(df)
@@ -116,6 +118,8 @@ def run(df, htf, cfg):
         if j4 < 0 or j15 < 0:
             continue
         bias = h4bias[j4]
+        if bias == 0 and h4_fallback and h4flow is not None:
+            bias = h4flow[j4]
         bullT4, bearB4 = h4bT[j4], h4sB[j4]
         flow = m15flow[j15]
         mitL = 0 <= m15bAge[j15] <= MIT_MAX_AGE
@@ -130,8 +134,10 @@ def run(df, htf, cfg):
             (i - h4BullTouchBar) <= REV_MAX_AGE and (i - sellSweepBar) <= REV_MAX_AGE
         neutralShort = (not cont_only) and bias == 0 and \
             (i - h4BearTouchBar) <= REV_MAX_AGE and (i - buySweepBar) <= REV_MAX_AGE
-        setupLong = (bias == 1 or neutralLong) and flow == 1 and mitL and mssDir == 1 and mssRecent
-        setupShort = (bias == -1 or neutralShort) and flow == -1 and mitS and mssDir == -1 and mssRecent
+        biasOkL = bias == 1 or neutralLong or (neutral_flow and bias == 0 and flow == 1)
+        biasOkS = bias == -1 or neutralShort or (neutral_flow and bias == 0 and flow == -1)
+        setupLong = biasOkL and flow == 1 and mitL and mssDir == 1 and mssRecent
+        setupShort = biasOkS and flow == -1 and mitS and mssDir == -1 and mssRecent
         if longs_only:
             setupShort = False
         if sweep_all:

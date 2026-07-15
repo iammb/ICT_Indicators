@@ -42,6 +42,8 @@ RR = 2.0                 # TP as a multiple of risk (1:2 reward-to-risk)
 CONT_ONLY = True         # drop neutral-bias reversal setups
 SL_SWING = True          # stop beyond the MSS swing, not just the FVG
 SWEEP_ALL = True         # ICT: liquidity sweep required before EVERY entry
+NEUTRAL_MODE = "structure"  # neutral 4H bias: "structure" = fall back to 4H
+                            # market-structure direction; "off" = stand aside
 MAX_TRADES_PER_DAY = 2
 
 
@@ -200,6 +202,9 @@ def main():
     m15flow, m15bAge, m15sAge = flow_engine(
         df15["open"].to_numpy(), df15["high"].to_numpy(),
         df15["low"].to_numpy(), df15["close"].to_numpy(), PIV_FLOW)
+    h4flow, _h1, _h2 = flow_engine(
+        df4["open"].to_numpy(), df4["high"].to_numpy(),
+        df4["low"].to_numpy(), df4["close"].to_numpy(), PIV_BIAS)
 
     # map each 1m bar -> last COMPLETED HTF bar (close time <= 1m bar open)
     t1 = df.index.asi8
@@ -283,6 +288,8 @@ def main():
         if j4 < 0 or j15 < 0:
             continue
         bias = h4bias[j4]
+        if bias == 0 and NEUTRAL_MODE == "structure":
+            bias = h4flow[j4]
         bullT4, bearB4 = h4bT[j4], h4sB[j4]
         flow = m15flow[j15]
         mitL = 0 <= m15bAge[j15] <= MIT_MAX_AGE
