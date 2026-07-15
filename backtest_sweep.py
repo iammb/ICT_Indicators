@@ -24,6 +24,8 @@ def run(df, htf, cfg, h4flow=None):
     (h4bias, h4bT, h4sB, m15flow, m15bAge, m15sAge, idx4, idx15) = htf
     neutral_flow = cfg.get("neutral_flow", False)   # neutral 4H: trade with 15M flow
     h4_fallback = cfg.get("h4_fallback", False)     # neutral 4H: use 4H structure dir
+    max_risk = cfg.get("max_risk", 0.0)             # cap on stop distance in points (0 = off)
+    fvg_fallback = cfg.get("fvg_fallback", False)   # too-wide swing stop -> try FVG stop
     o = df["open"].to_numpy(); h = df["high"].to_numpy()
     l = df["low"].to_numpy(); c = df["close"].to_numpy()
     n = len(df)
@@ -167,6 +169,13 @@ def run(df, htf, cfg, h4flow=None):
             base = min(eBullBot, lastSwingLo) if (sl_swing and not np.isnan(lastSwingLo)) else eBullBot
             sl = base - SL_BUFFER
             risk = entry - sl
+            if max_risk > 0 and risk > max_risk:
+                if fvg_fallback and (entry - (eBullBot - SL_BUFFER)) <= max_risk:
+                    sl = eBullBot - SL_BUFFER
+                    risk = entry - sl
+                else:
+                    eBullDone = True
+                    continue
             tp = entry + rr * risk
             eBullDone = True; day_count += 1
             if l[i] <= sl:
@@ -179,6 +188,13 @@ def run(df, htf, cfg, h4flow=None):
             base = max(eBearTop, lastSwingHi) if (sl_swing and not np.isnan(lastSwingHi)) else eBearTop
             sl = base + SL_BUFFER
             risk = sl - entry
+            if max_risk > 0 and risk > max_risk:
+                if fvg_fallback and ((eBearTop + SL_BUFFER) - entry) <= max_risk:
+                    sl = eBearTop + SL_BUFFER
+                    risk = sl - entry
+                else:
+                    eBearDone = True
+                    continue
             tp = entry - rr * risk
             eBearDone = True; day_count += 1
             if h[i] >= sl:
