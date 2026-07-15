@@ -38,7 +38,7 @@ KZ_START = 9 * 60 + 15   # 09:15 ET
 KZ_END = 12 * 60         # 12:00 ET
 EOD_MIN = 15 * 60 + 59   # force close at 15:59 ET bar
 SL_BUFFER = 2.0          # points beyond the FVG / swing
-RR = 1.0                 # TP as a multiple of risk (1.0 = highest win rate)
+RR = 2.0                 # TP as a multiple of risk (1:2 reward-to-risk)
 CONT_ONLY = True         # drop neutral-bias reversal setups
 SL_SWING = True          # stop beyond the MSS swing, not just the FVG
 MAX_TRADES_PER_DAY = 2
