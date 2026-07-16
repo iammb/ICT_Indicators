@@ -4,10 +4,12 @@
 //   4H  : FVG mitigation -> rejection -> MSS  => bias (Bullish / Bearish / Neutral)
 //   15M : order-flow direction + mitigation of the 15M FVG in the trade direction
 //   1M  : Market Structure Shift (non-negotiable) + 1M FVG as the entry trigger
-//   Extras: NY kill zone filter (09:15-12:00 ET), liquidity-sweep requirement for
-//           neutral-bias reversal setups at the 4H FVG boundary.
-// Designed to run on a 1-minute NAS100 chart. HTF values update on the live HTF bar
-// (no lookahead). Signals are confluence reads, not automated trade advice.
+//   Extras: NY kill zone filter (09:15-12:00 ET), liquidity sweep required before
+//           every entry, neutral-4H structure fallback, 55-pt max stop distance,
+//           swing-based stops with entry/SL/TP plan drawn at 2R.
+// Designed to run on a 1-minute NAS100 chart. By default HTF values come from
+// CONFIRMED 4H/15M bars only (no repaint - matches the backtest) and signals
+// confirm on bar close. Signals are confluence reads, not automated trade advice.
 indicator("ICT NAS100 - Bias & Signals", "ICT NAS100", overlay = true, max_boxes_count = 250, max_labels_count = 100, max_lines_count = 300)
 
 //------------------------------------------------------------------
@@ -41,6 +43,10 @@ swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpT
 slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
 maxRisk  = input.float(55, "Max stop distance (points, 0 = off)", minval = 0, step = 5, group = grpTP, tooltip = "If the swing-based stop is further than this, the setup is skipped. Backtest: wide-stop setups were net losers; caps of 45-70 pts all tested well.")
 showPlan = input.bool(true, "Draw entry / SL / TP on signal", group = grpTP)
+
+grpEx = "Signal integrity"
+htfConfirmed = input.bool(true, "Use confirmed HTF bars only (no repaint)", group = grpEx, tooltip = "ON: 4H/15M values come from fully closed bars, exactly like the backtest - live signals never repaint. OFF: HTF values update with the forming bar - more responsive but signals can appear and later vanish.")
+confirmBars  = input.bool(true, "Confirm signals on bar close", group = grpEx, tooltip = "ON: BUY/SELL fires only when the 1m bar closes (no intrabar flicker; set alerts to 'Once per bar'). OFF: fires intrabar on the first tick that taps the FVG.")
 
 grpVis = "Visuals"
 showTable    = input.bool(true, "Show status table", group = grpVis)
@@ -181,10 +187,23 @@ flowEngine(int pivLen) =>
 
 //------------------------------------------------------------------
 // Higher-timeframe requests
+// htfConfirmed ON: offset 1 + lookahead_on = last fully closed HTF bar on
+// both historical and realtime bars (canonical non-repainting pattern).
 //------------------------------------------------------------------
-[h4Bias, h4BullTop, h4BullBot, h4BearTop, h4BearBot] = request.security(syminfo.tickerid, tfBias, biasEngine(pivBias))
-[m15Flow, m15BullTop, m15BullBot, m15BullMitAge, m15BearTop, m15BearBot, m15BearMitAge] = request.security(syminfo.tickerid, tfFlow, flowEngine(pivFlow))
-[h4Struct, hs1, hs2, hs3, hs4, hs5, hs6] = request.security(syminfo.tickerid, tfBias, flowEngine(pivBias))
+biasEngineC(int pivLen, int o) =>
+    [b, bt, bb, st, sb] = biasEngine(pivLen)
+    [b[o], bt[o], bb[o], st[o], sb[o]]
+
+flowEngineC(int pivLen, int o) =>
+    [f, bt, bb, ba, st, sb, sa] = flowEngine(pivLen)
+    [f[o], bt[o], bb[o], ba[o], st[o], sb[o], sa[o]]
+
+int htfOff = htfConfirmed ? 1 : 0
+htfLa = htfConfirmed ? barmerge.lookahead_on : barmerge.lookahead_off
+
+[h4Bias, h4BullTop, h4BullBot, h4BearTop, h4BearBot] = request.security(syminfo.tickerid, tfBias, biasEngineC(pivBias, htfOff), lookahead = htfLa)
+[m15Flow, m15BullTop, m15BullBot, m15BullMitAge, m15BearTop, m15BearBot, m15BearMitAge] = request.security(syminfo.tickerid, tfFlow, flowEngineC(pivFlow, htfOff), lookahead = htfLa)
+[h4Struct, hs1, hs2, hs3, hs4, hs5, hs6] = request.security(syminfo.tickerid, tfBias, flowEngineC(pivBias, htfOff), lookahead = htfLa)
 
 //------------------------------------------------------------------
 // Chart (1M) structure: Market Structure Shift
@@ -310,8 +329,9 @@ riskOkS = maxRisk <= 0 or (not na(eBearBot) and slPlanS - eBearBot <= maxRisk)
 
 touchLong  = armedLong and bar_index > eBullBar and low <= eBullTop
 touchShort = armedShort and bar_index > eBearBar and high >= eBearBot
-longSignal  = touchLong and riskOkL
-shortSignal = touchShort and riskOkS
+barOk = not confirmBars or barstate.isconfirmed
+longSignal  = touchLong and riskOkL and barOk
+shortSignal = touchShort and riskOkS and barOk
 if touchLong
     eBullDone := true
 if touchShort
