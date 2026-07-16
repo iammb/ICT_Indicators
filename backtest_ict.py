@@ -40,6 +40,7 @@ EOD_MIN = 15 * 60 + 59   # force close at 15:59 ET bar
 SL_BUFFER = 2.0          # points beyond the FVG / swing
 RR = 2.0                 # TP as a multiple of risk (1:2 reward-to-risk)
 MAX_RISK = 55.0          # skip trades whose structural stop is wider (pts, 0 = off)
+MIN_RISK = 20.0          # widen tighter stops to this floor (pts, 0 = off)
 CONT_ONLY = True         # drop neutral-bias reversal setups
 SL_SWING = True          # stop beyond the MSS swing, not just the FVG
 SWEEP_ALL = True         # ICT: liquidity sweep required before EVERY entry
@@ -333,6 +334,9 @@ def main():
             eBullDone = True
             if MAX_RISK > 0 and risk > MAX_RISK:
                 continue  # structural stop too far away = low-quality setup
+            if MIN_RISK > 0 and risk < MIN_RISK:
+                sl = entry - MIN_RISK
+                risk = MIN_RISK
             tp = entry + RR * risk
             day_count += 1
             ttype = "continuation" if bias == 1 else "reversal"
@@ -354,6 +358,9 @@ def main():
             eBearDone = True
             if MAX_RISK > 0 and risk > MAX_RISK:
                 continue  # structural stop too far away = low-quality setup
+            if MIN_RISK > 0 and risk < MIN_RISK:
+                sl = entry + MIN_RISK
+                risk = MIN_RISK
             tp = entry - RR * risk
             day_count += 1
             ttype = "continuation" if bias == -1 else "reversal"

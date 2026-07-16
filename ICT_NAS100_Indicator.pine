@@ -42,6 +42,7 @@ rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, st
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
 slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
 maxRisk  = input.float(55, "Max stop distance (points, 0 = off)", minval = 0, step = 5, group = grpTP, tooltip = "If the swing-based stop is further than this, the setup is skipped. Backtest: wide-stop setups were net losers; caps of 45-70 pts all tested well.")
+minRisk  = input.float(20, "Min stop distance (points, 0 = off)", minval = 0, step = 1, group = grpTP, tooltip = "Stops tighter than this are widened to the floor, protecting against spread/noise on very small 1M FVGs.")
 showPlan = input.bool(true, "Draw entry / SL / TP on signal", group = grpTP)
 
 grpEx = "Signal integrity"
@@ -324,6 +325,10 @@ armedShort = setupShort and not na(eBearTop) and not eBearDone and kzOk
 // planned stop / risk (swing-based) evaluated before the trigger
 float slPlanL = (swingSL and not na(swingLoVal) ? math.min(eBullBot, swingLoVal) : eBullBot) - slBuf
 float slPlanS = (swingSL and not na(swingHiVal) ? math.max(eBearTop, swingHiVal) : eBearTop) + slBuf
+if minRisk > 0 and not na(eBullTop)
+    slPlanL := math.min(slPlanL, eBullTop - minRisk)
+if minRisk > 0 and not na(eBearBot)
+    slPlanS := math.max(slPlanS, eBearBot + minRisk)
 riskOkL = maxRisk <= 0 or (not na(eBullTop) and eBullTop - slPlanL <= maxRisk)
 riskOkS = maxRisk <= 0 or (not na(eBearBot) and slPlanS - eBearBot <= maxRisk)
 
