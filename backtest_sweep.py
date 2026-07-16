@@ -26,6 +26,11 @@ def run(df, htf, cfg, h4flow=None):
     h4_fallback = cfg.get("h4_fallback", False)     # neutral 4H: use 4H structure dir
     max_risk = cfg.get("max_risk", 0.0)             # cap on stop distance in points (0 = off)
     fvg_fallback = cfg.get("fvg_fallback", False)   # too-wide swing stop -> try FVG stop
+    mit_max = cfg.get("mit_age", MIT_MAX_AGE)       # 15M FVG mitigation freshness
+    mss_max = cfg.get("mss_age", MSS_MAX_AGE)       # 1M MSS freshness
+    max_trades = cfg.get("max_trades", MAX_TRADES_PER_DAY)
+    disp_sweep = cfg.get("disp_sweep", 0.0)         # displacement body >= x*ATR counts as sweep
+    entry_close = cfg.get("entry_close", False)     # enter at close of FVG bar (no retrace wait)
     o = df["open"].to_numpy(); h = df["high"].to_numpy()
     l = df["low"].to_numpy(); c = df["close"].to_numpy()
     n = len(df)
@@ -108,12 +113,19 @@ def run(df, htf, cfg, h4flow=None):
             mssDir = 1; mssBar = i; lastPh = np.nan
         if not np.isnan(lastPl) and c[i] < lastPl:
             mssDir = -1; mssBar = i; lastPl = np.nan
-        mssRecent = (i - mssBar) <= MSS_MAX_AGE
+        mssRecent = (i - mssBar) <= mss_max
 
         if not np.isnan(prevLo[i]):
             if l[i] < prevLo[i] and c[i] > prevLo[i]:
                 sellSweepBar = i
             if h[i] > prevHi[i] and c[i] < prevHi[i]:
+                buySweepBar = i
+        if disp_sweep > 0 and not np.isnan(atr[i]) and body[i] >= disp_sweep * atr[i]:
+            # strong displacement = institutional intent; grants the same
+            # permission as a sweep in its direction
+            if c[i] > o[i]:
+                sellSweepBar = i
+            else:
                 buySweepBar = i
 
         j4 = idx4[i]; j15 = idx15[i]
@@ -124,8 +136,8 @@ def run(df, htf, cfg, h4flow=None):
             bias = h4flow[j4]
         bullT4, bearB4 = h4bT[j4], h4sB[j4]
         flow = m15flow[j15]
-        mitL = 0 <= m15bAge[j15] <= MIT_MAX_AGE
-        mitS = 0 <= m15sAge[j15] <= MIT_MAX_AGE
+        mitL = 0 <= m15bAge[j15] <= mit_max
+        mitS = 0 <= m15sAge[j15] <= mit_max
 
         if not np.isnan(bullT4) and l[i] <= bullT4:
             h4BullTouchBar = i
@@ -161,9 +173,30 @@ def run(df, htf, cfg, h4flow=None):
             eBearTop = eBearBot = np.nan
 
         inKZ = kz_start <= mins[i] < kz_end
-        can_enter = pos is None and inKZ and day_count < MAX_TRADES_PER_DAY
+        can_enter = pos is None and inKZ and day_count < max_trades
 
-        if can_enter and setupLong and not np.isnan(eBullTop) and not eBullDone \
+        if entry_close and can_enter and not np.isnan(eBullTop) and not eBullDone and i == eBullBar:
+            entry = c[i]
+            base = min(eBullBot, lastSwingLo) if (sl_swing and not np.isnan(lastSwingLo)) else eBullBot
+            sl = base - SL_BUFFER
+            risk = entry - sl
+            eBullDone = True
+            if risk > 0 and not (max_risk > 0 and risk > max_risk):
+                day_count += 1
+                pos = {"dir": 1, "entry": entry, "sl": sl, "tp": entry + rr * risk, "risk": risk, "be": False}
+            continue
+        if entry_close and can_enter and not np.isnan(eBearTop) and not eBearDone and i == eBearBar:
+            entry = c[i]
+            base = max(eBearTop, lastSwingHi) if (sl_swing and not np.isnan(lastSwingHi)) else eBearTop
+            sl = base + SL_BUFFER
+            risk = sl - entry
+            eBearDone = True
+            if risk > 0 and not (max_risk > 0 and risk > max_risk):
+                day_count += 1
+                pos = {"dir": -1, "entry": entry, "sl": sl, "tp": entry - rr * risk, "risk": risk, "be": False}
+            continue
+
+        if not entry_close and can_enter and setupLong and not np.isnan(eBullTop) and not eBullDone \
                 and i > eBullBar and l[i] <= eBullTop:
             entry = eBullTop
             base = min(eBullBot, lastSwingLo) if (sl_swing and not np.isnan(lastSwingLo)) else eBullBot
@@ -182,7 +215,7 @@ def run(df, htf, cfg, h4flow=None):
                 rs.append(-1.0); results.append("SL"); years.append(df.index[i].year)
             else:
                 pos = {"dir": 1, "entry": entry, "sl": sl, "tp": tp, "risk": risk, "be": False}
-        elif can_enter and setupShort and not np.isnan(eBearTop) and not eBearDone \
+        elif not entry_close and can_enter and setupShort and not np.isnan(eBearTop) and not eBearDone \
                 and i > eBearBar and h[i] >= eBearBot:
             entry = eBearBot
             base = max(eBearTop, lastSwingHi) if (sl_swing and not np.isnan(lastSwingHi)) else eBearTop
