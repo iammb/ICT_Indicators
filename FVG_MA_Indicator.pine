@@ -1,0 +1,101 @@
+//@version=5
+indicator("FVG + Moving Averages", overlay=true, max_boxes_count=500)
+
+// ========== INPUTS ==========
+// FVG Settings
+show_fvg = input.bool(true, "Show Fair Value Gaps", group="FVG")
+fvg_lookback = input.int(50, "FVG Display Bars", minval=10, maxval=200, group="FVG")
+bullish_fvg_color = input.color(color.new(color.green, 80), "Bullish FVG Color", group="FVG")
+bearish_fvg_color = input.color(color.new(color.red, 80), "Bearish FVG Color", group="FVG")
+fvg_border_width = input.int(1, "FVG Border Width", minval=0, maxval=3, group="FVG")
+extend_fvg = input.bool(true, "Extend FVG to Current Bar", group="FVG")
+
+// EMA Settings
+show_emas = input.bool(true, "Show EMAs", group="EMAs")
+show_ema9 = input.bool(true, "Show 9 EMA", group="EMAs")
+show_ema20 = input.bool(true, "Show 20 EMA", group="EMAs")
+show_ema50 = input.bool(true, "Show 50 EMA", group="EMAs")
+show_ema200 = input.bool(true, "Show 200 EMA", group="EMAs")
+ema9_color = input.color(color.blue, "9 EMA Color", group="EMAs")
+ema20_color = input.color(color.red, "20 EMA Color", group="EMAs")
+ema50_color = input.color(color.orange, "50 EMA Color", group="EMAs")
+ema200_color = input.color(color.black, "200 EMA Color", group="EMAs")
+ema_width = input.int(2, "EMA Line Width", minval=1, maxval=4, group="EMAs")
+
+// ========== EMAs ==========
+ema9 = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// Plot EMAs
+plot(show_emas and show_ema9 ? ema9 : na, "EMA 9", color=ema9_color, linewidth=ema_width)
+plot(show_emas and show_ema20 ? ema20 : na, "EMA 20", color=ema20_color, linewidth=ema_width)
+plot(show_emas and show_ema50 ? ema50 : na, "EMA 50", color=ema50_color, linewidth=ema_width)
+plot(show_emas and show_ema200 ? ema200 : na, "EMA 200", color=ema200_color, linewidth=ema_width)
+
+// ========== FVG DETECTION AND DISPLAY ==========
+// Bullish FVG: gap between high[2] and low (current low > previous high[2])
+bullish_fvg = low > high[2]
+bullish_fvg_top = bullish_fvg ? low : na
+bullish_fvg_bottom = bullish_fvg ? high[2] : na
+
+// Bearish FVG: gap between low[2] and high (current high < previous low[2])
+bearish_fvg = high < low[2]
+bearish_fvg_top = bearish_fvg ? low[2] : na
+bearish_fvg_bottom = bearish_fvg ? high : na
+
+// Track active FVGs and check for invalidation
+var array<box> bullish_fvg_boxes = array.new<box>()
+var array<float> bullish_fvg_bottoms = array.new<float>()
+
+var array<box> bearish_fvg_boxes = array.new<box>()
+var array<float> bearish_fvg_tops = array.new<float>()
+
+// Create new bullish FVG
+if show_fvg and bullish_fvg
+    right_bar = extend_fvg ? bar_index + fvg_lookback : bar_index + 20
+    fvg_box = box.new(bar_index - 2, bullish_fvg_bottom, right_bar, bullish_fvg_top,
+             border_color=color.new(color.green, 50),
+             bgcolor=bullish_fvg_color,
+             border_width=fvg_border_width,
+             extend=extend_fvg ? extend.right : extend.none,
+             text="FVG",
+             text_color=color.new(color.green, 30),
+             text_size=size.tiny)
+    array.push(bullish_fvg_boxes, fvg_box)
+    array.push(bullish_fvg_bottoms, bullish_fvg_bottom)
+
+// Create new bearish FVG
+if show_fvg and bearish_fvg
+    right_bar = extend_fvg ? bar_index + fvg_lookback : bar_index + 20
+    fvg_box = box.new(bar_index - 2, bearish_fvg_top, right_bar, bearish_fvg_bottom,
+             border_color=color.new(color.red, 50),
+             bgcolor=bearish_fvg_color,
+             border_width=fvg_border_width,
+             extend=extend_fvg ? extend.right : extend.none,
+             text="FVG",
+             text_color=color.new(color.red, 30),
+             text_size=size.tiny)
+    array.push(bearish_fvg_boxes, fvg_box)
+    array.push(bearish_fvg_tops, bearish_fvg_top)
+
+// Check and remove filled bullish FVGs (price closes below FVG)
+if array.size(bullish_fvg_boxes) > 0 and array.size(bullish_fvg_bottoms) > 0
+    for i = array.size(bullish_fvg_boxes) - 1 to 0
+        if i < array.size(bullish_fvg_bottoms)
+            fvg_bottom = array.get(bullish_fvg_bottoms, i)
+            if close < fvg_bottom
+                box.delete(array.get(bullish_fvg_boxes, i))
+                array.remove(bullish_fvg_boxes, i)
+                array.remove(bullish_fvg_bottoms, i)
+
+// Check and remove filled bearish FVGs (price closes above FVG)
+if array.size(bearish_fvg_boxes) > 0 and array.size(bearish_fvg_tops) > 0
+    for i = array.size(bearish_fvg_boxes) - 1 to 0
+        if i < array.size(bearish_fvg_tops)
+            fvg_top = array.get(bearish_fvg_tops, i)
+            if close > fvg_top
+                box.delete(array.get(bearish_fvg_boxes, i))
+                array.remove(bearish_fvg_boxes, i)
+                array.remove(bearish_fvg_tops, i)
