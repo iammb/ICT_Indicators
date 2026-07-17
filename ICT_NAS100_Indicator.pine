@@ -191,20 +191,36 @@ flowEngine(int pivLen) =>
 // htfConfirmed ON: offset 1 + lookahead_on = last fully closed HTF bar on
 // both historical and realtime bars (canonical non-repainting pattern).
 //------------------------------------------------------------------
-biasEngineC(int pivLen, int o) =>
+biasEngineC(int pivLen) =>
     [b, bt, bb, st, sb] = biasEngine(pivLen)
-    [b[o], bt[o], bb[o], st[o], sb[o]]
+    [b[1], bt[1], bb[1], st[1], sb[1]]
 
-flowEngineC(int pivLen, int o) =>
+flowEngineC(int pivLen) =>
     [f, bt, bb, ba, st, sb, sa] = flowEngine(pivLen)
-    [f[o], bt[o], bb[o], ba[o], st[o], sb[o], sa[o]]
+    [f[1], bt[1], bb[1], ba[1], st[1], sb[1], sa[1]]
 
-int htfOff = htfConfirmed ? 1 : 0
-htfLa = htfConfirmed ? barmerge.lookahead_on : barmerge.lookahead_off
+// confirmed variant: offset 1 + lookahead_on = last fully closed HTF bar
+// live variant: default request = updates with the forming HTF bar
+[h4BiasC, h4BullTopC, h4BullBotC, h4BearTopC, h4BearBotC] = request.security(syminfo.tickerid, tfBias, biasEngineC(pivBias), lookahead = barmerge.lookahead_on)
+[h4BiasL, h4BullTopL, h4BullBotL, h4BearTopL, h4BearBotL] = request.security(syminfo.tickerid, tfBias, biasEngine(pivBias))
+[m15FlowC, m15BullTopC, m15BullBotC, m15BullMitAgeC, m15BearTopC, m15BearBotC, m15BearMitAgeC] = request.security(syminfo.tickerid, tfFlow, flowEngineC(pivFlow), lookahead = barmerge.lookahead_on)
+[m15FlowL, m15BullTopL, m15BullBotL, m15BullMitAgeL, m15BearTopL, m15BearBotL, m15BearMitAgeL] = request.security(syminfo.tickerid, tfFlow, flowEngine(pivFlow))
+[h4StructC, hc1, hc2, hc3, hc4, hc5, hc6] = request.security(syminfo.tickerid, tfBias, flowEngineC(pivBias), lookahead = barmerge.lookahead_on)
+[h4StructL, hl1, hl2, hl3, hl4, hl5, hl6] = request.security(syminfo.tickerid, tfBias, flowEngine(pivBias))
 
-[h4Bias, h4BullTop, h4BullBot, h4BearTop, h4BearBot] = request.security(syminfo.tickerid, tfBias, biasEngineC(pivBias, htfOff), lookahead = htfLa)
-[m15Flow, m15BullTop, m15BullBot, m15BullMitAge, m15BearTop, m15BearBot, m15BearMitAge] = request.security(syminfo.tickerid, tfFlow, flowEngineC(pivFlow, htfOff), lookahead = htfLa)
-[h4Struct, hs1, hs2, hs3, hs4, hs5, hs6] = request.security(syminfo.tickerid, tfBias, flowEngineC(pivBias, htfOff), lookahead = htfLa)
+h4Bias    = htfConfirmed ? h4BiasC : h4BiasL
+h4BullTop = htfConfirmed ? h4BullTopC : h4BullTopL
+h4BullBot = htfConfirmed ? h4BullBotC : h4BullBotL
+h4BearTop = htfConfirmed ? h4BearTopC : h4BearTopL
+h4BearBot = htfConfirmed ? h4BearBotC : h4BearBotL
+m15Flow       = htfConfirmed ? m15FlowC : m15FlowL
+m15BullTop    = htfConfirmed ? m15BullTopC : m15BullTopL
+m15BullBot    = htfConfirmed ? m15BullBotC : m15BullBotL
+m15BullMitAge = htfConfirmed ? m15BullMitAgeC : m15BullMitAgeL
+m15BearTop    = htfConfirmed ? m15BearTopC : m15BearTopL
+m15BearBot    = htfConfirmed ? m15BearBotC : m15BearBotL
+m15BearMitAge = htfConfirmed ? m15BearMitAgeC : m15BearMitAgeL
+h4Struct = htfConfirmed ? h4StructC : h4StructL
 
 //------------------------------------------------------------------
 // Chart (1M) structure: Market Structure Shift
@@ -393,7 +409,7 @@ if barstate.islast and showZones
 //------------------------------------------------------------------
 // Status table (top right)
 //------------------------------------------------------------------
-var table tb = table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1, border_color = color.new(color.gray, 60), border_width = 1)
+var table tb = table.new(position.top_right, 2, 11, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1, border_color = color.new(color.gray, 60), border_width = 1)
 
 cBull = color.new(color.green, 0)
 cBear = color.new(color.red, 0)
@@ -417,6 +433,15 @@ if showTable and barstate.islast
     typeTxt = armedLong or longSignal ? (h4Bias == 1 or nFallLong ? "Continuation" : "Reversal") : armedShort or shortSignal ? (h4Bias == -1 or nFallShort ? "Continuation" : "Reversal") : "-"
     sigTxt = longSignal ? "LONG NOW" : shortSignal ? "SHORT NOW" : armedLong ? "LONG SETUP" : armedShort ? "SHORT SETUP" : "WAIT"
     sigBg = longSignal or armedLong ? color.new(color.green, 25) : shortSignal or armedShort ? color.new(color.red, 25) : color.new(color.gray, 55)
+    // first gate currently blocking a trade, in checklist order
+    blockTxt = "-"
+    if m15Flow == 0
+        blockTxt := "15M flow flat"
+    else if m15Flow == 1
+        blockTxt := not biasOkLong ? "4H bias not bullish" : not mitOkLong ? "15M FVG not mitigated" : not (mssDir == 1 and mssRecent) ? "1M MSS not bullish" : sweepAll and not sellSweepRecent ? "No sell-side sweep" : na(eBullTop) or eBullDone ? "Waiting fresh 1M FVG" : not riskOkL ? "Stop outside limits" : not kzOk ? "Kill zone closed" : "READY - await FVG tap"
+    else
+        blockTxt := not biasOkShort ? "4H bias not bearish" : not mitOkShort ? "15M FVG not mitigated" : not (mssDir == -1 and mssRecent) ? "1M MSS not bearish" : sweepAll and not buySweepRecent ? "No buy-side sweep" : na(eBearTop) or eBearDone ? "Waiting fresh 1M FVG" : not riskOkS ? "Stop outside limits" : not kzOk ? "Kill zone closed" : "READY - await FVG tap"
+    blockCol = str.startswith(blockTxt, "READY") ? cBull : color.new(color.orange, 0)
 
     table.cell(tb, 0, 0, "ICT NAS100", text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 25))
     table.cell(tb, 1, 0, "TF " + timeframe.period, text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 25))
@@ -436,5 +461,7 @@ if showTable and barstate.islast
     table.cell(tb, 1, 7, entryTxt, text_color = entryCol, text_size = size.small)
     table.cell(tb, 0, 8, "Trade Type", text_color = color.silver, text_size = size.small)
     table.cell(tb, 1, 8, typeTxt, text_color = color.white, text_size = size.small)
-    table.cell(tb, 0, 9, "SIGNAL", text_color = color.white, text_size = size.small, bgcolor = sigBg)
-    table.cell(tb, 1, 9, sigTxt, text_color = color.white, text_size = size.small, bgcolor = sigBg)
+    table.cell(tb, 0, 9, "Blocker", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 9, blockTxt, text_color = blockCol, text_size = size.small)
+    table.cell(tb, 0, 10, "SIGNAL", text_color = color.white, text_size = size.small, bgcolor = sigBg)
+    table.cell(tb, 1, 10, sigTxt, text_color = color.white, text_size = size.small, bgcolor = sigBg)

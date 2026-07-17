@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""
+Independent backtest of ICT_NAS100_Indicator.pine on NQ 1-minute data.
+
+Written from scratch off the Pine source (not from backtest_ict.py). Purpose:
+a second, independently-derived implementation of the SAME indicator so its
+result can be trusted (or a discrepancy caught) rather than taken on faith.
+
+Indicator logic reproduced (all Pine defaults):
+  4H  biasEngine  : FVG mitigation -> rejection -> MSS  => bias {+1,-1,0}
+  15M flowEngine  : pivot-MSS order flow + directional FVG mitigation age
+  4H  flowEngine  : plain 4H market structure (neutral-bias fallback)
+  1M  : MSS (mandatory) + 1M FVG that forms while aligned = armed entry zone
+  Filters: NY kill zone 09:15-12:00 ET, liquidity sweep required before every
+           entry, 4H-structure fallback on neutral 4H bias.
+  Plan   : entry = FVG edge, stop beyond min(FVG, 1M swing) +/- 2pt buffer,
+           min stop 20pt / max stop 55pt, take-profit at 2R.
+  HTF values are read from the last CONFIRMED 4H / 15M bar (htfConfirmed=on).
+
+Trade-management layer (NOT in the indicator - my own, deliberately simple and
+stated up front so the numbers are reproducible):
+  * one position at a time; every signal that fires while flat is taken
+    (no arbitrary trades-per-day cap)
+  * fills are conservative: entry is a limit at the FVG edge; if the trigger
+    bar's range also spans the stop, it's booked as an immediate loss; on any
+    later bar that spans both stop and target, the STOP is assumed hit first
+  * any position still open at 16:59 ET is force-closed at that bar's close
+Independence note: this differs on purpose from backtest_ict.py, which capped
+at 2 trades/day and closed at 15:59. Convergence of the headline edge across
+the two designs is the actual cross-check.
+"""
+import numpy as np
+import pandas as pd
+
+CSV = "/Users/manjunathb/Downloads/Dataset_NQ_1min_2022_2025.csv"
+
+# ---- indicator defaults (ICT_NAS100_Indicator.pine) ----
+PIV_BIAS = PIV_FLOW = PIV_CHART = 3
+MSS_MAX_AGE = 30       # 1M bars
+MIT_MAX_AGE = 40       # 15M bars
+SWEEP_LEN = 20         # 1M bars
+REV_MAX_AGE = 60       # 1M bars (sweep freshness)
+KZ_START, KZ_END = 9 * 60 + 15, 12 * 60   # 09:15 .. 12:00 ET
+EOD_MIN = 16 * 60 + 59                     # force-close 16:59 ET
+SL_BUF = 2.0
+RR = 2.0
+MAX_RISK = 55.0
+MIN_RISK = 20.0
+SWEEP_ALL = True
+NEUTRAL_4H_STRUCTURE = True   # neutralMode = "4H structure"
+
+
+def load(csv):
+    df = pd.read_csv(csv)
+    df.columns = [c.strip() for c in df.columns]
+    t = pd.to_datetime(df["timestamp ET"], format="%m/%d/%Y %H:%M")
+    out = pd.DataFrame({"o": df["open"].to_numpy(float), "h": df["high"].to_numpy(float),
+                        "l": df["low"].to_numpy(float), "c": df["close"].to_numpy(float)},
+                       index=pd.DatetimeIndex(t)).sort_index()
+    out = out[~out.index.duplicated(keep="first")].dropna()
+    return out
+
+
+def resample(df, rule, origin):
+    r = (df.resample(rule, label="left", closed="left", origin=origin)
+         .agg({"o": "first", "h": "max", "l": "min", "c": "last"}).dropna())
+    return r
+
+
+def strict_pivots(h, l, piv):
+    """Return (ph, pl): value of a strict pivot high/low CONFIRMED at bar i
+    (i.e. the pivot sits at i-piv and is strictly above/below its piv
+    neighbours on both sides), else NaN. Matches ta.pivothigh(piv, piv)."""
+    n = len(h)
+    hs, ls = pd.Series(h), pd.Series(l)
+    rmax = hs.rolling(piv).max().to_numpy()   # max of (x-piv+1 .. x)
+    rmin = ls.rolling(piv).min().to_numpy()
+    ph = np.full(n, np.nan)
+    pl = np.full(n, np.nan)
+    for i in range(2 * piv, n):
+        p = i - piv
+        left_hi, right_hi = rmax[p - 1], rmax[i]      # neighbours excl. center
+        if h[p] > left_hi and h[p] > right_hi:
+            ph[i] = h[p]
+        left_lo, right_lo = rmin[p - 1], rmin[i]
+        if l[p] < left_lo and l[p] < right_lo:
+            pl[i] = l[p]
+    return ph, pl
+
+
+def bias_engine(h, l, c, piv):
+    """4H: mitigation -> rejection -> MSS => bias. Per-bar bias/FVG arrays."""
+    n = len(c)
+    hh = pd.Series(h).rolling(piv * 2 + 1, min_periods=1).max().to_numpy()
+    ll = pd.Series(l).rolling(piv * 2 + 1, min_periods=1).min().to_numpy()
+    bias = np.zeros(n, int)
+    bT = np.full(n, np.nan); bB = np.full(n, np.nan)
+    sT = np.full(n, np.nan); sB = np.full(n, np.nan)
+    bullTop = bullBot = bearTop = bearBot = np.nan
+    bullMit = bullRej = bearMit = bearRej = False
+    bullTrig = bearTrig = np.nan
+    b = 0
+    for i in range(n):
+        if i >= 2 and l[i] > h[i - 2]:
+            bullTop, bullBot, bullMit, bullRej, bullTrig = l[i], h[i - 2], False, False, np.nan
+        if i >= 2 and h[i] < l[i - 2]:
+            bearTop, bearBot, bearMit, bearRej, bearTrig = l[i - 2], h[i], False, False, np.nan
+        if not np.isnan(bullTop):
+            if c[i] < bullBot:
+                bullTop = bullBot = np.nan; bullMit = bullRej = False
+                if b == 1: b = 0
+            else:
+                if not bullMit and l[i] <= bullTop:
+                    bullMit = True; bullTrig = hh[i - 1] if i > 0 else h[i]
+                if bullMit and not bullRej and c[i] > bullTop:
+                    bullRej = True
+                if bullMit and bullRej and not np.isnan(bullTrig) and c[i] > bullTrig:
+                    b = 1
+        if not np.isnan(bearTop):
+            if c[i] > bearTop:
+                bearTop = bearBot = np.nan; bearMit = bearRej = False
+                if b == -1: b = 0
+            else:
+                if not bearMit and h[i] >= bearBot:
+                    bearMit = True; bearTrig = ll[i - 1] if i > 0 else l[i]
+                if bearMit and not bearRej and c[i] < bearBot:
+                    bearRej = True
+                if bearMit and bearRej and not np.isnan(bearTrig) and c[i] < bearTrig:
+                    b = -1
+        bias[i], bT[i], bB[i], sT[i], sB[i] = b, bullTop, bullBot, bearTop, bearBot
+    return bias, bT, bB, sT, sB
+
+
+def flow_engine(h, l, c, piv):
+    """15M / 4H: pivot-break order flow + directional FVG mitigation age."""
+    n = len(c)
+    ph, pl = strict_pivots(h, l, piv)
+    flow = np.zeros(n, int)
+    bAge = np.full(n, -1, int); sAge = np.full(n, -1, int)
+    lastPh = lastPl = np.nan
+    f = 0
+    bullTop = bullBot = bearTop = bearBot = np.nan
+    bMit = sMit = -1
+    for i in range(n):
+        if not np.isnan(ph[i]): lastPh = ph[i]
+        if not np.isnan(pl[i]): lastPl = pl[i]
+        if not np.isnan(lastPh) and c[i] > lastPh:
+            f = 1; lastPh = np.nan
+        if not np.isnan(lastPl) and c[i] < lastPl:
+            f = -1; lastPl = np.nan
+        if i >= 2 and l[i] > h[i - 2]:
+            bullTop, bullBot, bMit = l[i], h[i - 2], -1
+        if i >= 2 and h[i] < l[i - 2]:
+            bearTop, bearBot, sMit = l[i - 2], h[i], -1
+        if not np.isnan(bullTop):
+            if c[i] < bullBot:
+                bullTop = bullBot = np.nan; bMit = -1
+            elif bMit < 0:
+                if l[i] <= bullTop: bMit = 0
+            else:
+                bMit += 1
+        if not np.isnan(bearTop):
+            if c[i] > bearTop:
+                bearTop = bearBot = np.nan; sMit = -1
+            elif sMit < 0:
+                if h[i] >= bearBot: sMit = 0
+            else:
+                sMit += 1
+        flow[i], bAge[i], sAge[i] = f, bMit, sMit
+    return flow, bAge, sAge
+
+
+def confirmed_index(bar_open_ns, htf_index, bar_span):
+    """Last HTF bar fully closed at/before each 1M bar open (no repaint)."""
+    ends = (htf_index + bar_span).asi8
+    return np.searchsorted(ends, bar_open_ns, side="right") - 1
+
+
+def run(origin_label):
+    df = load(CSV)
+    origin = "start_day" if origin_label == "midnight" else \
+        pd.Timestamp("1970-01-01 18:00:00")   # 18:00 ET session anchor
+    d4 = resample(df, "4h", origin)
+    d15 = resample(df, "15min", "start_day")
+
+    b4, b4bT, b4bB, b4sT, b4sB = bias_engine(d4.h.values, d4.l.values, d4.c.values, PIV_BIAS)
+    f4, _, _ = flow_engine(d4.h.values, d4.l.values, d4.c.values, PIV_BIAS)
+    f15, a15b, a15s = flow_engine(d15.h.values, d15.l.values, d15.c.values, PIV_FLOW)
+
+    t = df.index.asi8
+    i4 = confirmed_index(t, d4.index, pd.Timedelta(hours=4))
+    i15 = confirmed_index(t, d15.index, pd.Timedelta(minutes=15))
+
+    o, h, l, c = df.o.values, df.h.values, df.l.values, df.c.values
+    n = len(df)
+    mins = (df.index.hour * 60 + df.index.minute).to_numpy()
+    day = df.index.normalize().asi8
+
+    phC, plC = strict_pivots(h, l, PIV_CHART)
+    prevLo = pd.Series(l).rolling(SWEEP_LEN).min().shift(1).to_numpy()
+    prevHi = pd.Series(h).rolling(SWEEP_LEN).max().shift(1).to_numpy()
+
+    lastPh = lastPl = swingHi = swingLo = np.nan
+    mssDir, mssBar = 0, -10**9
+    sellSweepBar = buySweepBar = h4BullTouch = h4BearTouch = -10**9
+    eBT = eBB = np.nan; eBbar = -1; eBdone = False
+    eST = eSB = np.nan; eSbar = -1; eSdone = False
+
+    pos = None
+    trades, n_signals = [], 0
+
+    for i in range(n):
+        # ---- manage open trade (stop priority) ----
+        if pos is not None:
+            px = res = None
+            if pos["dir"] == 1:
+                if l[i] <= pos["sl"]: px, res = pos["sl"], "SL"
+                elif h[i] >= pos["tp"]: px, res = pos["tp"], "TP"
+            else:
+                if h[i] >= pos["sl"]: px, res = pos["sl"], "SL"
+                elif l[i] <= pos["tp"]: px, res = pos["tp"], "TP"
+            if px is None and mins[i] >= EOD_MIN:
+                px, res = c[i], "EOD"
+            if px is not None:
+                pts = (px - pos["entry"]) * pos["dir"]
+                trades.append({**pos, "exit_time": df.index[i], "exit": px,
+                               "result": res, "points": pts, "r": pts / pos["risk"]})
+                pos = None
+
+        # ---- 1M pivots + MSS ----
+        if not np.isnan(phC[i]): lastPh = swingHi = phC[i]
+        if not np.isnan(plC[i]): lastPl = swingLo = plC[i]
+        if not np.isnan(lastPh) and c[i] > lastPh:
+            mssDir, mssBar, lastPh = 1, i, np.nan
+        if not np.isnan(lastPl) and c[i] < lastPl:
+            mssDir, mssBar, lastPl = -1, i, np.nan
+        mssRecent = (i - mssBar) <= MSS_MAX_AGE
+
+        # ---- liquidity sweeps ----
+        if not np.isnan(prevLo[i]):
+            if l[i] < prevLo[i] and c[i] > prevLo[i]: sellSweepBar = i
+            if h[i] > prevHi[i] and c[i] < prevHi[i]: buySweepBar = i
+
+        j4, j15 = i4[i], i15[i]
+        if j4 < 0 or j15 < 0:
+            continue
+        bias = b4[j4]
+        if bias == 0 and NEUTRAL_4H_STRUCTURE:
+            bias = f4[j4]
+        bullT4, bearB4 = b4bT[j4], b4sB[j4]
+        flow = f15[j15]
+        mitL = 0 <= a15b[j15] <= MIT_MAX_AGE
+        mitS = 0 <= a15s[j15] <= MIT_MAX_AGE
+
+        if not np.isnan(bullT4) and l[i] <= bullT4: h4BullTouch = i
+        if not np.isnan(bearB4) and h[i] >= bearB4: h4BearTouch = i
+
+        setupLong = (bias == 1 and flow == 1 and mitL and mssDir == 1 and mssRecent)
+        setupShort = (bias == -1 and flow == -1 and mitS and mssDir == -1 and mssRecent)
+        if SWEEP_ALL:
+            setupLong = setupLong and (i - sellSweepBar) <= REV_MAX_AGE
+            setupShort = setupShort and (i - buySweepBar) <= REV_MAX_AGE
+
+        # ---- 1M entry FVG register / invalidate ----
+        if i >= 2:
+            if l[i] > h[i - 2] and setupLong:
+                eBT, eBB, eBbar, eBdone = l[i], h[i - 2], i, False
+            if h[i] < l[i - 2] and setupShort:
+                eST, eSB, eSbar, eSdone = l[i - 2], h[i], i, False
+        if not np.isnan(eBT) and c[i] < eBB: eBT = eBB = np.nan
+        if not np.isnan(eST) and c[i] > eST: eST = eSB = np.nan
+
+        inKZ = KZ_START <= mins[i] < KZ_END
+        flat = pos is None
+
+        # ---- long trigger ----
+        if (setupLong and not np.isnan(eBT) and not eBdone and inKZ
+                and i > eBbar and l[i] <= eBT):
+            eBdone = True
+            base = min(eBB, swingLo) if not np.isnan(swingLo) else eBB
+            sl = base - SL_BUF
+            entry = eBT
+            if MIN_RISK > 0: sl = min(sl, entry - MIN_RISK)
+            risk = entry - sl
+            if not (MAX_RISK > 0 and risk > MAX_RISK):
+                n_signals += 1
+                if flat:
+                    tp = entry + RR * risk
+                    rec = {"dir": 1, "entry_time": df.index[i], "entry": entry,
+                           "sl": sl, "tp": tp, "risk": risk,
+                           "type": "continuation" if b4[j4] == 1 else "neutral"}
+                    if l[i] <= sl:   # trigger bar also spans the stop
+                        trades.append({**rec, "exit_time": df.index[i], "exit": sl,
+                                       "result": "SL", "points": sl - entry, "r": -1.0})
+                    else:
+                        pos = rec
+
+        # ---- short trigger ----
+        elif (setupShort and not np.isnan(eST) and not eSdone and inKZ
+                and i > eSbar and h[i] >= eSB):
+            eSdone = True
+            base = max(eST, swingHi) if not np.isnan(swingHi) else eST
+            sl = base + SL_BUF
+            entry = eSB
+            if MIN_RISK > 0: sl = max(sl, entry + MIN_RISK)
+            risk = sl - entry
+            if not (MAX_RISK > 0 and risk > MAX_RISK):
+                n_signals += 1
+                if flat:
+                    tp = entry - RR * risk
+                    rec = {"dir": -1, "entry_time": df.index[i], "entry": entry,
+                           "sl": sl, "tp": tp, "risk": risk,
+                           "type": "continuation" if b4[j4] == -1 else "neutral"}
+                    if h[i] >= sl:
+                        trades.append({**rec, "exit_time": df.index[i], "exit": sl,
+                                       "result": "SL", "points": entry - sl, "r": -1.0})
+                    else:
+                        pos = rec
+
+    if pos is not None:
+        pts = (c[-1] - pos["entry"]) * pos["dir"]
+        trades.append({**pos, "exit_time": df.index[-1], "exit": c[-1],
+                       "result": "EOD", "points": pts, "r": pts / pos["risk"]})
+
+    tr = pd.DataFrame(trades)
+    return df, d4, d15, tr, n_signals
+
+
+def stats(tr, label):
+    n = len(tr)
+    if n == 0:
+        print(f"{label}: no trades"); return
+    wins = (tr.r > 0).sum()
+    tot = tr.r.sum()
+    pos_r = tr.loc[tr.r > 0, "r"].sum()
+    neg_r = -tr.loc[tr.r < 0, "r"].sum()
+    pf = pos_r / neg_r if neg_r else float("inf")
+    eq = tr.r.cumsum()
+    dd = (eq - eq.cummax()).min()
+    print(f"{label:<16} trades={n:<4} win%={wins/n*100:5.1f}  totR={tot:+7.1f}  "
+          f"avgR={tr.r.mean():+6.3f}  PF={pf:4.2f}  maxDD={dd:6.1f}R  pts={tr.points.sum():+9.1f}")
+
+
+def report(origin_label):
+    df, d4, d15, tr, n_signals = run(origin_label)
+    print("=" * 96)
+    print(f"4H anchoring: {origin_label}")
+    print(f"1M bars {len(df):,}  ({df.index[0]} -> {df.index[-1]})   "
+          f"4H bars {len(d4):,}   15M bars {len(d15):,}")
+    print(f"signals fired: {n_signals}   trades taken (1 pos at a time): {len(tr)}")
+    if tr.empty:
+        return tr
+    stats(tr, "ALL")
+    for y in sorted(tr.entry_time.dt.year.unique()):
+        stats(tr[tr.entry_time.dt.year == y], f"  {y}")
+    stats(tr[tr.dir == 1], "  Longs")
+    stats(tr[tr.dir == -1], "  Shorts")
+    print("  exits:", tr.result.value_counts().to_dict(),
+          f"| avg risk {tr.risk.mean():.1f}pt (median {tr.risk.median():.1f})")
+    # cost sensitivity (points deducted per round trip)
+    print("  net of costs:", end=" ")
+    for cost in (0.0, 1.0, 2.0):
+        net_pts = tr.points.sum() - cost * len(tr)
+        net_r = (tr.points - cost).div(tr.risk).sum()
+        print(f"[{cost:.0f}pt/rt -> {net_pts:+.0f}pts, {net_r:+.1f}R]", end=" ")
+    print()
+    return tr
+
+
+if __name__ == "__main__":
+    tr_main = report("midnight")
+    print()
+    report("18:00-ET")
+    if tr_main is not None and not tr_main.empty:
+        out = "/Users/manjunathb/Documents/FAB/ICT Indicator/backtest_v2_trades.csv"
+        tr_main.assign(cum_r=tr_main.r.cumsum()).to_csv(out, index=False)
+        print(f"\ntrade log (midnight anchoring): {out}")
