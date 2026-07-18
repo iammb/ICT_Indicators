@@ -15,8 +15,9 @@ Indicator logic reproduced (all Pine defaults):
            entry, 4H-structure fallback on neutral 4H bias (longs only - see
            NEUTRAL_LONG_ONLY: neutral-bias shorts backtested as a net loser).
   Plan   : entry = full fill through the 1M FVG (ENTRY_FRAC=1.0), stop beyond
-           min(FVG, 1M swing) +/- 2pt buffer, min stop 20pt / max stop 55pt,
-           take-profit at 2R. 15M mitigation must be fresh (MIT_MAX_AGE=5 bars).
+           min(FVG, 1M swing) +/- 2pt buffer, min stop 20pt / max stop 55pt (these
+           scale with price when USE_VOLSTOP is on - see below), take-profit at 2R.
+           15M mitigation must be fresh (MIT_MAX_AGE=5 bars).
   HTF values are read from the last CONFIRMED 4H / 15M bar (htfConfirmed=on).
 
 Trade-management layer (NOT in the indicator - my own, deliberately simple and
@@ -55,6 +56,13 @@ SL_BUF = 2.0
 RR = 2.0
 MAX_RISK = 55.0
 MIN_RISK = 20.0
+USE_VOLSTOP = True     # scale the stop floor/cap/buffer by (entry / REF_PRICE) so they stay a
+REF_PRICE = 20000.0    # constant % of price (portable across price levels / instruments).
+                       # Point values above are the distances at REF_PRICE (NQ 2022-2025 median).
+                       # Validated: neutral-to-better on NQ (+167->+176R, PF 2.14->2.25) and it
+                       # removes the price-scale distortion that force-closed 56% of trades on the
+                       # 2008-2020 OANDA out-of-sample set (see backtest_volstop.py). Set False for
+                       # fixed absolute points (original behaviour).
 ENTRY_FRAC = 1.0       # 0=enter at 1M FVG near edge (first tap), 1=full fill at far edge.
                        # backtest: 1.0 alone raised win% 43.1->46.4 (PF 1.47->1.66) with MORE
                        # total return from fewer trades; combined with MIT_MAX_AGE=5 above:
@@ -300,12 +308,14 @@ def run(origin_label):
           trigL = eBT - ENTRY_FRAC * (eBT - eBB)
           if l[i] <= trigL:
             eBdone = True
-            base = min(eBB, swingLo) if not np.isnan(swingLo) else eBB
-            sl = base - SL_BUF
             entry = trigL
-            if MIN_RISK > 0: sl = min(sl, entry - MIN_RISK)
+            sc = (entry / REF_PRICE) if USE_VOLSTOP else 1.0
+            buf, minr, maxr = SL_BUF * sc, MIN_RISK * sc, MAX_RISK * sc
+            base = min(eBB, swingLo) if not np.isnan(swingLo) else eBB
+            sl = base - buf
+            if minr > 0: sl = min(sl, entry - minr)
             risk = entry - sl
-            if not (MAX_RISK > 0 and risk > MAX_RISK):
+            if not (maxr > 0 and risk > maxr):
                 n_signals += 1
                 if flat:
                     tp = entry + RR * risk
@@ -324,12 +334,14 @@ def run(origin_label):
           trigS = eSB + ENTRY_FRAC * (eST - eSB)
           if h[i] >= trigS:
             eSdone = True
-            base = max(eST, swingHi) if not np.isnan(swingHi) else eST
-            sl = base + SL_BUF
             entry = trigS
-            if MIN_RISK > 0: sl = max(sl, entry + MIN_RISK)
+            sc = (entry / REF_PRICE) if USE_VOLSTOP else 1.0
+            buf, minr, maxr = SL_BUF * sc, MIN_RISK * sc, MAX_RISK * sc
+            base = max(eST, swingHi) if not np.isnan(swingHi) else eST
+            sl = base + buf
+            if minr > 0: sl = max(sl, entry + minr)
             risk = sl - entry
-            if not (MAX_RISK > 0 and risk > MAX_RISK):
+            if not (maxr > 0 and risk > maxr):
                 n_signals += 1
                 if flat:
                     tp = entry - RR * risk

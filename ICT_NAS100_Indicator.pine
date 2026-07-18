@@ -7,8 +7,9 @@
 //   Extras: NY morning session (09:30-13:00 ET), liquidity sweep required before
 //           every entry, neutral-4H structure fallback gated by a daily-200-SMA
 //           regime guard (long above / short below - insurance against a downtrend,
-//           ~free on the bull sample), 55-pt max stop distance, swing-based stops
-//           with entry/SL/TP plan drawn at 2R.
+//           ~free on the bull sample), price-scaled swing-based stops (the point
+//           floor/cap scale with price so the model is portable across price levels
+//           and instruments), entry/SL/TP plan drawn at 2R.
 //   Win-rate tuning (backtested NQ 1-min 2022-2025): require FRESH 15M FVG
 //   mitigation (<=5 bars, not up to 40) and enter only on a FULL FILL through
 //   the 1M FVG (entryFrac=1.0, not a first-touch tap) - together these took the
@@ -62,9 +63,11 @@ regimeMaLen = input.int(200, "Regime SMA length (daily bars)", minval = 20, grou
 dispMult = input.float(0.0, "Min displacement body (x ATR14, 0 = off)", minval = 0, step = 0.25, group = grpTP)
 rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
-slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
-maxRisk  = input.float(55, "Max stop distance (points, 0 = off)", minval = 0, step = 5, group = grpTP, tooltip = "If the swing-based stop is further than this, the setup is skipped. Backtest: wide-stop setups were net losers; caps of 45-70 pts all tested well.")
-minRisk  = input.float(20, "Min stop distance (points, 0 = off)", minval = 0, step = 1, group = grpTP, tooltip = "Stops tighter than this are widened to the floor, protecting against spread/noise on very small 1M FVGs.")
+slBuf    = input.float(2.0, "Stop buffer (points @ ref price)", minval = 0, step = 0.5, group = grpTP)
+maxRisk  = input.float(55, "Max stop distance (points @ ref price, 0 = off)", minval = 0, step = 5, group = grpTP, tooltip = "If the swing-based stop is further than this, the setup is skipped. Backtest: wide-stop setups were net losers; caps of 45-70 pts all tested well. When 'scale stops by price' is on, this is the distance at the reference price and scales with the current price.")
+minRisk  = input.float(20, "Min stop distance (points @ ref price, 0 = off)", minval = 0, step = 1, group = grpTP, tooltip = "Stops tighter than this are widened to the floor, protecting against spread/noise on very small 1M FVGs. When 'scale stops by price' is on, this is the distance at the reference price and scales with the current price.")
+useVolStop = input.bool(true, "Scale stops by price (volatility-portable)", group = grpTP, tooltip = "The stop floor/cap/buffer above are absolute points, calibrated to NQ at ~20k. ON multiplies them by (price / reference price) so they stay a constant PERCENT of price - the strategy then works at any price level or instrument without recalibration. Validated: neutral-to-better on NQ 2022-2025 (+167->+176R, PF 2.14->2.25), and it removes the price-scale distortion that force-closed 56% of trades in the 2008-2020 out-of-sample test (there, fixed points -> % of price took +144R/PF1.44 to +302R/PF1.57 and made every one of 13 unseen years profitable). OFF = fixed absolute points (original behaviour).")
+refPrice = input.float(20000, "Reference price for stop scaling", minval = 1, group = grpTP, tooltip = "The price at which the point distances above are taken literally (NQ's ~2022-2025 median). Stops scale linearly from here: at 2x this price a 20-pt floor becomes 40 pt (same %), at half it becomes 10 pt. Only used when 'scale stops by price' is on.")
 entryFrac = input.float(1.0, "Entry depth into 1M FVG (0=near edge, 1=full fill)", minval = 0, maxval = 1, step = 0.25, group = grpTP, tooltip = "Backtest: waiting for price to trade all the way through the 1M FVG (1.0) instead of just tagging the near edge (0) raised win rate from 43.1% to 46.4% on its own (PF 1.47 -> 1.66), with MORE total return from fewer trades. 0.5 = enter at the FVG midpoint (ICT 'CE'). Combined with the mitigation-freshness change above: ~48% win, PF 1.84.")
 dowFilter = input.bool(false, "Trade Tue/Fri only (aggressive, off by default)", group = grpTP, tooltip = "OPTIONAL and less robust than the settings above: restricting entries to Tuesday and Friday nominally pushed win rate to 51.5% in backtest, but on only 3 years of data with one of those years landing under 50% - a calendar effect is a weaker, less trustworthy edge than the fresh-mitigation / full-fill-entry logic. Off by default; enable only if you understand and accept that risk.")
 showPlan = input.bool(true, "Draw entry / SL / TP on signal", group = grpTP)
@@ -388,15 +391,23 @@ armedShort = setupShort and not na(eBearTop) and not eBearDone and kzOk and dowO
 eBullTrig = not na(eBullTop) ? eBullTop - entryFrac * (eBullTop - eBullBot) : na
 eBearTrig = not na(eBearTop) ? eBearBot + entryFrac * (eBearTop - eBearBot) : na
 
+// volatility-scaled risk bounds: the point inputs above are the distances at
+// refPrice; scaling by (close / refPrice) keeps them a constant % of price so the
+// stop floor/cap/buffer stay meaningful at any price level (see useVolStop tooltip).
+riskScale = useVolStop ? close / refPrice : 1.0
+slBufR    = slBuf * riskScale
+minRiskR  = minRisk * riskScale
+maxRiskR  = maxRisk * riskScale
+
 // planned stop / risk (swing-based) evaluated before the trigger
-float slPlanL = (swingSL and not na(swingLoVal) ? math.min(eBullBot, swingLoVal) : eBullBot) - slBuf
-float slPlanS = (swingSL and not na(swingHiVal) ? math.max(eBearTop, swingHiVal) : eBearTop) + slBuf
-if minRisk > 0 and not na(eBullTrig)
-    slPlanL := math.min(slPlanL, eBullTrig - minRisk)
-if minRisk > 0 and not na(eBearTrig)
-    slPlanS := math.max(slPlanS, eBearTrig + minRisk)
-riskOkL = maxRisk <= 0 or (not na(eBullTrig) and eBullTrig - slPlanL <= maxRisk)
-riskOkS = maxRisk <= 0 or (not na(eBearTrig) and slPlanS - eBearTrig <= maxRisk)
+float slPlanL = (swingSL and not na(swingLoVal) ? math.min(eBullBot, swingLoVal) : eBullBot) - slBufR
+float slPlanS = (swingSL and not na(swingHiVal) ? math.max(eBearTop, swingHiVal) : eBearTop) + slBufR
+if minRiskR > 0 and not na(eBullTrig)
+    slPlanL := math.min(slPlanL, eBullTrig - minRiskR)
+if minRiskR > 0 and not na(eBearTrig)
+    slPlanS := math.max(slPlanS, eBearTrig + minRiskR)
+riskOkL = maxRiskR <= 0 or (not na(eBullTrig) and eBullTrig - slPlanL <= maxRiskR)
+riskOkS = maxRiskR <= 0 or (not na(eBearTrig) and slPlanS - eBearTrig <= maxRiskR)
 
 touchLong  = armedLong and bar_index > eBullBar and low <= eBullTrig
 touchShort = armedShort and bar_index > eBearBar and high >= eBearTrig
