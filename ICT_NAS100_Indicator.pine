@@ -5,9 +5,10 @@
 //   15M : order-flow direction + mitigation of the 15M FVG in the trade direction
 //   1M  : Market Structure Shift (non-negotiable) + 1M FVG as the entry trigger
 //   Extras: NY morning session (09:30-13:00 ET), liquidity sweep required before
-//           every entry, neutral-4H structure fallback (longs only - neutral-bias
-//           shorts backtested as a net loser), 55-pt max stop distance,
-//           swing-based stops with entry/SL/TP plan drawn at 2R.
+//           every entry, neutral-4H structure fallback gated by a daily-200-SMA
+//           regime guard (long above / short below - insurance against a downtrend,
+//           ~free on the bull sample), 55-pt max stop distance, swing-based stops
+//           with entry/SL/TP plan drawn at 2R.
 //   Win-rate tuning (backtested NQ 1-min 2022-2025): require FRESH 15M FVG
 //   mitigation (<=5 bars, not up to 40) and enter only on a FULL FILL through
 //   the 1M FVG (entryFrac=1.0, not a first-touch tap) - together these took the
@@ -55,7 +56,9 @@ grpTP = "Trade plan (backtested: fresh mitigation + full-fill entry, 09:30-13:00
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
 sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
 neutralMode = input.string("4H structure", "When 4H bias is neutral", options = ["Stand aside", "4H structure", "15M flow"], group = grpTP, tooltip = "4H FVG bias is neutral ~40% of the time. '4H structure' falls back to plain 4H market structure direction; '15M flow' defers to the 15M order flow; 'Stand aside' takes no trades (strictest, highest PF).")
-neutralLongOnly = input.bool(true, "Neutral fallback: longs only", group = grpTP, tooltip = "Backtest (NQ 2022-2025): neutral-4H-bias SHORTS lost money (29.7% win, PF 0.82) while neutral-4H-bias LONGS were the best-performing bucket (47.3% win, PF 1.67) - the index trended up over the test period. ON restricts the fallback above to longs; neutral-bias shorts stand aside and require an actual bearish 4H FVG bias instead. Turn OFF to apply the fallback symmetrically to both directions.")
+neutralLongOnly = input.bool(true, "Neutral fallback: longs only (when regime guard off)", group = grpTP, tooltip = "Backtest (NQ 2022-2025): neutral-4H-bias SHORTS lost money (29.7% win, PF 0.82) while neutral-4H-bias LONGS were the best-performing bucket (47.3% win, PF 1.67) - the index trended up over the test period. ON restricts the fallback above to longs; neutral-bias shorts stand aside and require an actual bearish 4H FVG bias instead. Turn OFF to apply the fallback symmetrically to both directions. IGNORED when the regime guard below is ON (the guard supersedes it).")
+useRegime = input.bool(true, "Regime guard: neutral fallback follows daily trend", group = grpTP, tooltip = "The static 'longs only' neutral fallback is fit to a 2022-2025 uptrend and would lean long into a downtrend - the strategy's main hidden risk, since the whole backtest is a bull market. ON replaces it with a regime-following rule: take the neutral-4H fallback LONG only when the daily close is above its SMA, SHORT only when below. Insurance, not optimisation - it is ~free on the bull sample (+3R, 305->311 trades, PF 2.15->2.14, drawdown unchanged) because regime was 'down' only 9% of days, and on those down-days it correctly switched the fallback to short. It CANNOT be validated for a sustained bear market (none exists in the data); justified by mechanism + costing nothing in-sample. Explicit bullish/bearish 4H FVG-bias trades are NEVER gated by this - only the discretionary neutral fallback.")
+regimeMaLen = input.int(200, "Regime SMA length (daily bars)", minval = 20, group = grpTP, tooltip = "Length of the daily SMA that defines up vs down regime for the guard above. 200 = the classic bull/bear line. Uses the last CONFIRMED daily bar (no repaint); before enough history exists the regime defaults to 'up'.")
 dispMult = input.float(0.0, "Min displacement body (x ATR14, 0 = off)", minval = 0, step = 0.25, group = grpTP)
 rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
@@ -251,6 +254,12 @@ m15BearBot    = htfConfirmed ? m15BearBotC : m15BearBotL
 m15BearMitAge = htfConfirmed ? m15BearMitAgeC : m15BearMitAgeL
 h4Struct = htfConfirmed ? h4StructC : h4StructL
 
+// Daily trend regime for the neutral-fallback guard: is the last CONFIRMED daily
+// close above its SMA? offset [1] + lookahead_on = last fully closed daily bar (no
+// repaint, matches the backtest). Warmup (SMA not yet available) defaults to 'up'.
+[regimeMa, regimeClose] = request.security(syminfo.tickerid, "D", [ta.sma(close, regimeMaLen)[1], close[1]], lookahead = barmerge.lookahead_on)
+regimeUp = na(regimeMa) or regimeClose >= regimeMa
+
 //------------------------------------------------------------------
 // Chart (1M) structure: Market Structure Shift
 //------------------------------------------------------------------
@@ -318,8 +327,12 @@ dowOk = not dowFilter or dayofweek == dayofweek.tuesday or dayofweek == dayofwee
 //------------------------------------------------------------------
 neutralLongCtx  = useRev and h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
 neutralShortCtx = useRev and h4Bias == 0 and h4BearTouchRecent and buySweepRecent
-nFallLong  = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == 1 or neutralMode == "15M flow")
-nFallShort = h4Bias == 0 and not neutralLongOnly and (neutralMode == "4H structure" and h4Struct == -1 or neutralMode == "15M flow")
+nFallLongBase  = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == 1 or neutralMode == "15M flow")
+nFallShortBase = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == -1 or neutralMode == "15M flow")
+// Regime guard supersedes neutralLongOnly: long fallback only in an up regime,
+// short fallback only in a down regime. Guard off = original static behaviour.
+nFallLong  = nFallLongBase  and (useRegime ? regimeUp : true)
+nFallShort = nFallShortBase and (useRegime ? not regimeUp : not neutralLongOnly)
 biasOkLong  = h4Bias == 1 or neutralLongCtx or nFallLong
 biasOkShort = h4Bias == -1 or neutralShortCtx or nFallShort
 flowOkLong  = m15Flow == 1
