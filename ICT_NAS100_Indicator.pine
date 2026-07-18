@@ -60,6 +60,8 @@ showZones    = input.bool(true, "Draw active 4H / 15M FVG zones", group = grpVis
 biasEngine(int pivLen) =>
     newBull = low > high[2]
     newBear = high < low[2]
+    // rolling high/low stand in for "the swing to break" for MSS confirmation -
+    // an approximation, not a confirmed ta.pivothigh/pivotlow like the 15M/1M engines use
     hh = ta.highest(high, pivLen * 2 + 1)
     ll = ta.lowest(low, pivLen * 2 + 1)
 
@@ -191,22 +193,28 @@ flowEngine(int pivLen) =>
 // htfConfirmed ON: offset 1 + lookahead_on = last fully closed HTF bar on
 // both historical and realtime bars (canonical non-repainting pattern).
 //------------------------------------------------------------------
-biasEngineC(int pivLen) =>
-    [b, bt, bb, st, sb] = biasEngine(pivLen)
-    [b[1], bt[1], bb[1], st[1], sb[1]]
-
 flowEngineC(int pivLen) =>
     [f, bt, bb, ba, st, sb, sa] = flowEngine(pivLen)
     [f[1], bt[1], bb[1], ba[1], st[1], sb[1], sa[1]]
 
+// combined 4H reader: MSS-confirmed bias (mitigation -> rejection -> MSS) plus a
+// plain pivot-break structure direction, reusing the 15M flow engine's logic, for
+// the neutral-bias fallback below. One HTF request instead of two per variant.
+biasStructEngine(int pivLen) =>
+    [bias, bullTop, bullBot, bearTop, bearBot] = biasEngine(pivLen)
+    [structDir, flowBt, flowBb, flowBa, flowSt, flowSb, flowSa] = flowEngine(pivLen)
+    [bias, bullTop, bullBot, bearTop, bearBot, structDir]
+
+biasStructEngineC(int pivLen) =>
+    [bias, bullTop, bullBot, bearTop, bearBot, structDir] = biasStructEngine(pivLen)
+    [bias[1], bullTop[1], bullBot[1], bearTop[1], bearBot[1], structDir[1]]
+
 // confirmed variant: offset 1 + lookahead_on = last fully closed HTF bar
 // live variant: default request = updates with the forming HTF bar
-[h4BiasC, h4BullTopC, h4BullBotC, h4BearTopC, h4BearBotC] = request.security(syminfo.tickerid, tfBias, biasEngineC(pivBias), lookahead = barmerge.lookahead_on)
-[h4BiasL, h4BullTopL, h4BullBotL, h4BearTopL, h4BearBotL] = request.security(syminfo.tickerid, tfBias, biasEngine(pivBias))
+[h4BiasC, h4BullTopC, h4BullBotC, h4BearTopC, h4BearBotC, h4StructC] = request.security(syminfo.tickerid, tfBias, biasStructEngineC(pivBias), lookahead = barmerge.lookahead_on)
+[h4BiasL, h4BullTopL, h4BullBotL, h4BearTopL, h4BearBotL, h4StructL] = request.security(syminfo.tickerid, tfBias, biasStructEngine(pivBias))
 [m15FlowC, m15BullTopC, m15BullBotC, m15BullMitAgeC, m15BearTopC, m15BearBotC, m15BearMitAgeC] = request.security(syminfo.tickerid, tfFlow, flowEngineC(pivFlow), lookahead = barmerge.lookahead_on)
 [m15FlowL, m15BullTopL, m15BullBotL, m15BullMitAgeL, m15BearTopL, m15BearBotL, m15BearMitAgeL] = request.security(syminfo.tickerid, tfFlow, flowEngine(pivFlow))
-[h4StructC, hc1, hc2, hc3, hc4, hc5, hc6] = request.security(syminfo.tickerid, tfBias, flowEngineC(pivBias), lookahead = barmerge.lookahead_on)
-[h4StructL, hl1, hl2, hl3, hl4, hl5, hl6] = request.security(syminfo.tickerid, tfBias, flowEngine(pivBias))
 
 h4Bias    = htfConfirmed ? h4BiasC : h4BiasL
 h4BullTop = htfConfirmed ? h4BullTopC : h4BullTopL
@@ -229,6 +237,8 @@ phC = ta.pivothigh(high, pivChart, pivChart)
 plC = ta.pivotlow(low, pivChart, pivChart)
 var float lastPhC = na
 var float lastPlC = na
+// used later as the stop-loss swing reference (slPlanL/slPlanS) - note these never
+// expire, so a stale swing from well before the current setup can still anchor the stop
 var float swingHiVal = na
 var float swingLoVal = na
 if not na(phC)
