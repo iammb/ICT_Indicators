@@ -5,7 +5,8 @@
 //   15M : order-flow direction + mitigation of the 15M FVG in the trade direction
 //   1M  : Market Structure Shift (non-negotiable) + 1M FVG as the entry trigger
 //   Extras: NY kill zone filter (09:15-12:00 ET), liquidity sweep required before
-//           every entry, neutral-4H structure fallback, 55-pt max stop distance,
+//           every entry, neutral-4H structure fallback (longs only - neutral-bias
+//           shorts backtested as a net loser), 55-pt max stop distance,
 //           swing-based stops with entry/SL/TP plan drawn at 2R.
 // Designed to run on a 1-minute NAS100 chart. By default HTF values come from
 // CONFIRMED 4H/15M bars only (no repaint - matches the backtest) and signals
@@ -33,10 +34,11 @@ useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ
 kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
 showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
 
-grpTP = "Trade plan (backtested: sweep + RR 2.0 + swing stop, PF 1.53)"
+grpTP = "Trade plan (backtested: sweep + RR 2.0 + swing stop + long-only neutral fallback, PF 1.47)"
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
 sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
 neutralMode = input.string("4H structure", "When 4H bias is neutral", options = ["Stand aside", "4H structure", "15M flow"], group = grpTP, tooltip = "4H FVG bias is neutral ~40% of the time. '4H structure' falls back to plain 4H market structure direction; '15M flow' defers to the 15M order flow; 'Stand aside' takes no trades (strictest, highest PF).")
+neutralLongOnly = input.bool(true, "Neutral fallback: longs only", group = grpTP, tooltip = "Backtest (NQ 2022-2025): neutral-4H-bias SHORTS lost money (29.7% win, PF 0.82) while neutral-4H-bias LONGS were the best-performing bucket (47.3% win, PF 1.67) - the index trended up over the test period. ON restricts the fallback above to longs; neutral-bias shorts stand aside and require an actual bearish 4H FVG bias instead. Turn OFF to apply the fallback symmetrically to both directions.")
 dispMult = input.float(0.0, "Min displacement body (x ATR14, 0 = off)", minval = 0, step = 0.25, group = grpTP)
 rrTarget = input.float(2.0, "Take-profit target (R multiple)", minval = 0.25, step = 0.25, group = grpTP)
 swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpTP)
@@ -297,7 +299,7 @@ bgcolor(showKZ and inKZ ? color.new(color.blue, 94) : na)
 neutralLongCtx  = useRev and h4Bias == 0 and h4BullTouchRecent and sellSweepRecent
 neutralShortCtx = useRev and h4Bias == 0 and h4BearTouchRecent and buySweepRecent
 nFallLong  = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == 1 or neutralMode == "15M flow")
-nFallShort = h4Bias == 0 and (neutralMode == "4H structure" and h4Struct == -1 or neutralMode == "15M flow")
+nFallShort = h4Bias == 0 and not neutralLongOnly and (neutralMode == "4H structure" and h4Struct == -1 or neutralMode == "15M flow")
 biasOkLong  = h4Bias == 1 or neutralLongCtx or nFallLong
 biasOkShort = h4Bias == -1 or neutralShortCtx or nFallShort
 flowOkLong  = m15Flow == 1

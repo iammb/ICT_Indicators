@@ -12,7 +12,8 @@ Indicator logic reproduced (all Pine defaults):
   4H  flowEngine  : plain 4H market structure (neutral-bias fallback)
   1M  : MSS (mandatory) + 1M FVG that forms while aligned = armed entry zone
   Filters: NY kill zone 09:15-12:00 ET, liquidity sweep required before every
-           entry, 4H-structure fallback on neutral 4H bias.
+           entry, 4H-structure fallback on neutral 4H bias (longs only - see
+           NEUTRAL_LONG_ONLY: neutral-bias shorts backtested as a net loser).
   Plan   : entry = FVG edge, stop beyond min(FVG, 1M swing) +/- 2pt buffer,
            min stop 20pt / max stop 55pt, take-profit at 2R.
   HTF values are read from the last CONFIRMED 4H / 15M bar (htfConfirmed=on).
@@ -48,6 +49,9 @@ MAX_RISK = 55.0
 MIN_RISK = 20.0
 SWEEP_ALL = True
 NEUTRAL_4H_STRUCTURE = True   # neutralMode = "4H structure"
+NEUTRAL_LONG_ONLY = True      # neutralLongOnly = true: neutral-bias fallback applies to longs
+                              # only (backtest: neutral shorts 29.7% win/PF 0.82 vs neutral
+                              # longs 47.3% win/PF 1.67 - NQ trended up over 2022-2025)
 
 
 def load(csv):
@@ -244,9 +248,9 @@ def run(origin_label):
         j4, j15 = i4[i], i15[i]
         if j4 < 0 or j15 < 0:
             continue
-        bias = b4[j4]
-        if bias == 0 and NEUTRAL_4H_STRUCTURE:
-            bias = f4[j4]
+        rawBias = b4[j4]
+        biasLong = rawBias == 1 or (rawBias == 0 and NEUTRAL_4H_STRUCTURE and f4[j4] == 1)
+        biasShort = rawBias == -1 or (rawBias == 0 and NEUTRAL_4H_STRUCTURE and not NEUTRAL_LONG_ONLY and f4[j4] == -1)
         bullT4, bearB4 = b4bT[j4], b4sB[j4]
         flow = f15[j15]
         mitL = 0 <= a15b[j15] <= MIT_MAX_AGE
@@ -255,8 +259,8 @@ def run(origin_label):
         if not np.isnan(bullT4) and l[i] <= bullT4: h4BullTouch = i
         if not np.isnan(bearB4) and h[i] >= bearB4: h4BearTouch = i
 
-        setupLong = (bias == 1 and flow == 1 and mitL and mssDir == 1 and mssRecent)
-        setupShort = (bias == -1 and flow == -1 and mitS and mssDir == -1 and mssRecent)
+        setupLong = (biasLong and flow == 1 and mitL and mssDir == 1 and mssRecent)
+        setupShort = (biasShort and flow == -1 and mitS and mssDir == -1 and mssRecent)
         if SWEEP_ALL:
             setupLong = setupLong and (i - sellSweepBar) <= REV_MAX_AGE
             setupShort = setupShort and (i - buySweepBar) <= REV_MAX_AGE
