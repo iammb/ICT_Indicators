@@ -14,8 +14,9 @@ Indicator logic reproduced (all Pine defaults):
   Filters: NY kill zone 09:15-12:00 ET, liquidity sweep required before every
            entry, 4H-structure fallback on neutral 4H bias (longs only - see
            NEUTRAL_LONG_ONLY: neutral-bias shorts backtested as a net loser).
-  Plan   : entry = FVG edge, stop beyond min(FVG, 1M swing) +/- 2pt buffer,
-           min stop 20pt / max stop 55pt, take-profit at 2R.
+  Plan   : entry = full fill through the 1M FVG (ENTRY_FRAC=1.0), stop beyond
+           min(FVG, 1M swing) +/- 2pt buffer, min stop 20pt / max stop 55pt,
+           take-profit at 2R. 15M mitigation must be fresh (MIT_MAX_AGE=5 bars).
   HTF values are read from the last CONFIRMED 4H / 15M bar (htfConfirmed=on).
 
 Trade-management layer (NOT in the indicator - my own, deliberately simple and
@@ -38,7 +39,8 @@ CSV = "/Users/manjunathb/Downloads/Dataset_NQ_1min_2022_2025.csv"
 # ---- indicator defaults (ICT_NAS100_Indicator.pine) ----
 PIV_BIAS = PIV_FLOW = PIV_CHART = 3
 MSS_MAX_AGE = 30       # 1M bars
-MIT_MAX_AGE = 40       # 15M bars
+MIT_MAX_AGE = 5        # 15M bars - fresh mitigation only (was 40; backtest: 46.9% win/PF 1.73
+                       # vs 43.1%/1.47 at 40 - acting on the reaction NOW beats a stale tap)
 SWEEP_LEN = 20         # 1M bars
 REV_MAX_AGE = 60       # 1M bars (sweep freshness)
 KZ_START, KZ_END = 9 * 60 + 15, 12 * 60   # 09:15 .. 12:00 ET
@@ -47,11 +49,18 @@ SL_BUF = 2.0
 RR = 2.0
 MAX_RISK = 55.0
 MIN_RISK = 20.0
+ENTRY_FRAC = 1.0       # 0=enter at 1M FVG near edge (first tap), 1=full fill at far edge.
+                       # backtest: 1.0 alone raised win% 43.1->46.4 (PF 1.47->1.66) with MORE
+                       # total return from fewer trades; combined with MIT_MAX_AGE=5 above:
+                       # ~48% win, PF 1.84, consistent across all 3 years and both 4H anchors.
 SWEEP_ALL = True
 NEUTRAL_4H_STRUCTURE = True   # neutralMode = "4H structure"
 NEUTRAL_LONG_ONLY = True      # neutralLongOnly = true: neutral-bias fallback applies to longs
                               # only (backtest: neutral shorts 29.7% win/PF 0.82 vs neutral
                               # longs 47.3% win/PF 1.67 - NQ trended up over 2022-2025)
+DOW_FILTER = False     # OPTIONAL, off by default: restrict entries to Tue/Fri. Backtest:
+                       # nominally reaches 51.5% win, but on only 3 years of data with one
+                       # year under 50% - weaker, calendar-based edge than the levers above.
 
 
 def load(csv):
@@ -199,6 +208,7 @@ def run(origin_label):
     n = len(df)
     mins = (df.index.hour * 60 + df.index.minute).to_numpy()
     day = df.index.normalize().asi8
+    dow = df.index.dayofweek.to_numpy()  # Mon=0 .. Fri=4
 
     phC, plC = strict_pivots(h, l, PIV_CHART)
     prevLo = pd.Series(l).rolling(SWEEP_LEN).min().shift(1).to_numpy()
@@ -275,15 +285,18 @@ def run(origin_label):
         if not np.isnan(eST) and c[i] > eST: eST = eSB = np.nan
 
         inKZ = KZ_START <= mins[i] < KZ_END
+        inDow = (not DOW_FILTER) or dow[i] in (1, 4)  # Tue=1, Fri=4
         flat = pos is None
 
         # ---- long trigger ----
-        if (setupLong and not np.isnan(eBT) and not eBdone and inKZ
-                and i > eBbar and l[i] <= eBT):
+        if (setupLong and not np.isnan(eBT) and not eBdone and inKZ and inDow
+                and i > eBbar):
+          trigL = eBT - ENTRY_FRAC * (eBT - eBB)
+          if l[i] <= trigL:
             eBdone = True
             base = min(eBB, swingLo) if not np.isnan(swingLo) else eBB
             sl = base - SL_BUF
-            entry = eBT
+            entry = trigL
             if MIN_RISK > 0: sl = min(sl, entry - MIN_RISK)
             risk = entry - sl
             if not (MAX_RISK > 0 and risk > MAX_RISK):
@@ -300,12 +313,14 @@ def run(origin_label):
                         pos = rec
 
         # ---- short trigger ----
-        elif (setupShort and not np.isnan(eST) and not eSdone and inKZ
-                and i > eSbar and h[i] >= eSB):
+        elif (setupShort and not np.isnan(eST) and not eSdone and inKZ and inDow
+                and i > eSbar):
+          trigS = eSB + ENTRY_FRAC * (eST - eSB)
+          if h[i] >= trigS:
             eSdone = True
             base = max(eST, swingHi) if not np.isnan(swingHi) else eST
             sl = base + SL_BUF
-            entry = eSB
+            entry = trigS
             if MIN_RISK > 0: sl = max(sl, entry + MIN_RISK)
             risk = sl - entry
             if not (MAX_RISK > 0 and risk > MAX_RISK):

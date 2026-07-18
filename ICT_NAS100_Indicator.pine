@@ -8,6 +8,12 @@
 //           every entry, neutral-4H structure fallback (longs only - neutral-bias
 //           shorts backtested as a net loser), 55-pt max stop distance,
 //           swing-based stops with entry/SL/TP plan drawn at 2R.
+//   Win-rate tuning (backtested NQ 1-min 2022-2025): require FRESH 15M FVG
+//   mitigation (<=5 bars, not up to 40) and enter only on a FULL FILL through
+//   the 1M FVG (entryFrac=1.0, not a first-touch tap) - together these took the
+//   baseline 43.1% win / PF 1.47 to ~48% win / PF 1.84, consistent across every
+//   year and both 4H-anchoring conventions tested, with lower drawdown and equal
+//   or better total return despite fewer trades.
 // Designed to run on a 1-minute NAS100 chart. By default HTF values come from
 // CONFIRMED 4H/15M bars only (no repaint - matches the backtest) and signals
 // confirm on bar close. Signals are confluence reads, not automated trade advice.
@@ -25,7 +31,7 @@ pivBias   = input.int(3, "4H swing pivot length", minval = 1, group = grpST)
 pivFlow   = input.int(3, "15M swing pivot length", minval = 1, group = grpST)
 pivChart  = input.int(3, "Chart (1M) swing pivot length", minval = 1, group = grpST)
 mssMaxAge = input.int(30, "Max chart bars since 1M MSS", minval = 1, group = grpST)
-mitMaxAge = input.int(40, "Max 15M bars since 15M FVG mitigation", minval = 1, group = grpST)
+mitMaxAge = input.int(5, "Max 15M bars since 15M FVG mitigation", minval = 1, group = grpST, tooltip = "Backtest: fresh mitigation (<=5 bars = <=75min) beat stale mitigation (up to 40 bars = 10hrs) by a wide margin - 46.9% win / PF 1.73 vs 43.1% win / PF 1.47 - acting on the FVG reaction NOW is a materially stronger setup than reacting to a tap from hours ago.")
 sweepLen  = input.int(20, "Liquidity sweep lookback (chart bars)", minval = 2, group = grpST)
 revMaxAge = input.int(60, "Max chart bars since sweep / 4H touch (reversals)", minval = 1, group = grpST)
 
@@ -34,7 +40,7 @@ useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ
 kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
 showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
 
-grpTP = "Trade plan (backtested: sweep + RR 2.0 + swing stop + long-only neutral fallback, PF 1.47)"
+grpTP = "Trade plan (backtested: fresh mitigation + full-fill entry, ~48% win, PF 1.84)"
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
 sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
 neutralMode = input.string("4H structure", "When 4H bias is neutral", options = ["Stand aside", "4H structure", "15M flow"], group = grpTP, tooltip = "4H FVG bias is neutral ~40% of the time. '4H structure' falls back to plain 4H market structure direction; '15M flow' defers to the 15M order flow; 'Stand aside' takes no trades (strictest, highest PF).")
@@ -45,6 +51,8 @@ swingSL  = input.bool(true, "Stop beyond MSS swing (not just FVG)", group = grpT
 slBuf    = input.float(2.0, "Stop buffer (points)", minval = 0, step = 0.5, group = grpTP)
 maxRisk  = input.float(55, "Max stop distance (points, 0 = off)", minval = 0, step = 5, group = grpTP, tooltip = "If the swing-based stop is further than this, the setup is skipped. Backtest: wide-stop setups were net losers; caps of 45-70 pts all tested well.")
 minRisk  = input.float(20, "Min stop distance (points, 0 = off)", minval = 0, step = 1, group = grpTP, tooltip = "Stops tighter than this are widened to the floor, protecting against spread/noise on very small 1M FVGs.")
+entryFrac = input.float(1.0, "Entry depth into 1M FVG (0=near edge, 1=full fill)", minval = 0, maxval = 1, step = 0.25, group = grpTP, tooltip = "Backtest: waiting for price to trade all the way through the 1M FVG (1.0) instead of just tagging the near edge (0) raised win rate from 43.1% to 46.4% on its own (PF 1.47 -> 1.66), with MORE total return from fewer trades. 0.5 = enter at the FVG midpoint (ICT 'CE'). Combined with the mitigation-freshness change above: ~48% win, PF 1.84.")
+dowFilter = input.bool(false, "Trade Tue/Fri only (aggressive, off by default)", group = grpTP, tooltip = "OPTIONAL and less robust than the settings above: restricting entries to Tuesday and Friday nominally pushed win rate to 51.5% in backtest, but on only 3 years of data with one of those years landing under 50% - a calendar effect is a weaker, less trustworthy edge than the fresh-mitigation / full-fill-entry logic. Off by default; enable only if you understand and accept that risk.")
 showPlan = input.bool(true, "Draw entry / SL / TP on signal", group = grpTP)
 
 grpEx = "Signal integrity"
@@ -292,6 +300,7 @@ h4BearTouchRecent = not na(h4BearTouchBar) and bar_index - h4BearTouchBar <= rev
 inKZ = not na(time(timeframe.period, kzSess, "America/New_York"))
 kzOk = not useKZ or inKZ
 bgcolor(showKZ and inKZ ? color.new(color.blue, 94) : na)
+dowOk = not dowFilter or dayofweek == dayofweek.tuesday or dayofweek == dayofweek.friday
 
 //------------------------------------------------------------------
 // Setup alignment (Steps 1-4 of the flagship model)
@@ -347,21 +356,26 @@ if not na(eBearTop) and close > eBearTop
     eBearTop := na
     eBearBot := na
 
-armedLong  = setupLong and not na(eBullTop) and not eBullDone and kzOk
-armedShort = setupShort and not na(eBearTop) and not eBearDone and kzOk
+armedLong  = setupLong and not na(eBullTop) and not eBullDone and kzOk and dowOk
+armedShort = setupShort and not na(eBearTop) and not eBearDone and kzOk and dowOk
+
+// entry trigger level: how deep into the 1M FVG price must trade before filling
+// (0 = near edge / first tag, 1 = full fill at the far edge)
+eBullTrig = not na(eBullTop) ? eBullTop - entryFrac * (eBullTop - eBullBot) : na
+eBearTrig = not na(eBearTop) ? eBearBot + entryFrac * (eBearTop - eBearBot) : na
 
 // planned stop / risk (swing-based) evaluated before the trigger
 float slPlanL = (swingSL and not na(swingLoVal) ? math.min(eBullBot, swingLoVal) : eBullBot) - slBuf
 float slPlanS = (swingSL and not na(swingHiVal) ? math.max(eBearTop, swingHiVal) : eBearTop) + slBuf
-if minRisk > 0 and not na(eBullTop)
-    slPlanL := math.min(slPlanL, eBullTop - minRisk)
-if minRisk > 0 and not na(eBearBot)
-    slPlanS := math.max(slPlanS, eBearBot + minRisk)
-riskOkL = maxRisk <= 0 or (not na(eBullTop) and eBullTop - slPlanL <= maxRisk)
-riskOkS = maxRisk <= 0 or (not na(eBearBot) and slPlanS - eBearBot <= maxRisk)
+if minRisk > 0 and not na(eBullTrig)
+    slPlanL := math.min(slPlanL, eBullTrig - minRisk)
+if minRisk > 0 and not na(eBearTrig)
+    slPlanS := math.max(slPlanS, eBearTrig + minRisk)
+riskOkL = maxRisk <= 0 or (not na(eBullTrig) and eBullTrig - slPlanL <= maxRisk)
+riskOkS = maxRisk <= 0 or (not na(eBearTrig) and slPlanS - eBearTrig <= maxRisk)
 
-touchLong  = armedLong and bar_index > eBullBar and low <= eBullTop
-touchShort = armedShort and bar_index > eBearBar and high >= eBearBot
+touchLong  = armedLong and bar_index > eBullBar and low <= eBullTrig
+touchShort = armedShort and bar_index > eBearBar and high >= eBearTrig
 barOk = not confirmBars or barstate.isconfirmed
 longSignal  = touchLong and riskOkL and barOk
 shortSignal = touchShort and riskOkS and barOk
@@ -372,17 +386,17 @@ if touchShort
 
 // Entry / SL / TP plan drawn at the moment a signal fires
 if longSignal and showPlan
-    float tpL = eBullTop + rrTarget * (eBullTop - slPlanL)
-    line.new(bar_index, eBullTop, bar_index + 30, eBullTop, color = color.gray, width = 1)
+    float tpL = eBullTrig + rrTarget * (eBullTrig - slPlanL)
+    line.new(bar_index, eBullTrig, bar_index + 30, eBullTrig, color = color.gray, width = 1)
     line.new(bar_index, slPlanL, bar_index + 30, slPlanL, color = color.red, width = 1)
     line.new(bar_index, tpL, bar_index + 30, tpL, color = color.green, width = 1)
-    label.new(bar_index + 30, tpL, "TP " + str.tostring(tpL, format.mintick) + "\nE  " + str.tostring(eBullTop, format.mintick) + "\nSL " + str.tostring(slPlanL, format.mintick), style = label.style_label_left, color = color.new(color.green, 70), textcolor = color.white, size = size.small)
+    label.new(bar_index + 30, tpL, "TP " + str.tostring(tpL, format.mintick) + "\nE  " + str.tostring(eBullTrig, format.mintick) + "\nSL " + str.tostring(slPlanL, format.mintick), style = label.style_label_left, color = color.new(color.green, 70), textcolor = color.white, size = size.small)
 if shortSignal and showPlan
-    float tpS = eBearBot - rrTarget * (slPlanS - eBearBot)
-    line.new(bar_index, eBearBot, bar_index + 30, eBearBot, color = color.gray, width = 1)
+    float tpS = eBearTrig - rrTarget * (slPlanS - eBearTrig)
+    line.new(bar_index, eBearTrig, bar_index + 30, eBearTrig, color = color.gray, width = 1)
     line.new(bar_index, slPlanS, bar_index + 30, slPlanS, color = color.red, width = 1)
     line.new(bar_index, tpS, bar_index + 30, tpS, color = color.green, width = 1)
-    label.new(bar_index + 30, tpS, "TP " + str.tostring(tpS, format.mintick) + "\nE  " + str.tostring(eBearBot, format.mintick) + "\nSL " + str.tostring(slPlanS, format.mintick), style = label.style_label_left, color = color.new(color.red, 70), textcolor = color.white, size = size.small)
+    label.new(bar_index + 30, tpS, "TP " + str.tostring(tpS, format.mintick) + "\nE  " + str.tostring(eBearTrig, format.mintick) + "\nSL " + str.tostring(slPlanS, format.mintick), style = label.style_label_left, color = color.new(color.red, 70), textcolor = color.white, size = size.small)
 
 plotshape(longSignal, title = "BUY", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small, text = "BUY", textcolor = color.white)
 plotshape(shortSignal, title = "SELL", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small, text = "SELL", textcolor = color.white)
@@ -450,9 +464,9 @@ if showTable and barstate.islast
     if m15Flow == 0
         blockTxt := "15M flow flat"
     else if m15Flow == 1
-        blockTxt := not biasOkLong ? "4H bias not bullish" : not mitOkLong ? "15M FVG not mitigated" : not (mssDir == 1 and mssRecent) ? "1M MSS not bullish" : sweepAll and not sellSweepRecent ? "No sell-side sweep" : na(eBullTop) or eBullDone ? "Waiting fresh 1M FVG" : not riskOkL ? "Stop outside limits" : not kzOk ? "Kill zone closed" : "READY - await FVG tap"
+        blockTxt := not biasOkLong ? "4H bias not bullish" : not mitOkLong ? "15M FVG not mitigated" : not (mssDir == 1 and mssRecent) ? "1M MSS not bullish" : sweepAll and not sellSweepRecent ? "No sell-side sweep" : na(eBullTop) or eBullDone ? "Waiting fresh 1M FVG" : not riskOkL ? "Stop outside limits" : not kzOk ? "Kill zone closed" : not dowOk ? "Excluded day (Tue/Fri only)" : "READY - await FVG tap"
     else
-        blockTxt := not biasOkShort ? "4H bias not bearish" : not mitOkShort ? "15M FVG not mitigated" : not (mssDir == -1 and mssRecent) ? "1M MSS not bearish" : sweepAll and not buySweepRecent ? "No buy-side sweep" : na(eBearTop) or eBearDone ? "Waiting fresh 1M FVG" : not riskOkS ? "Stop outside limits" : not kzOk ? "Kill zone closed" : "READY - await FVG tap"
+        blockTxt := not biasOkShort ? "4H bias not bearish" : not mitOkShort ? "15M FVG not mitigated" : not (mssDir == -1 and mssRecent) ? "1M MSS not bearish" : sweepAll and not buySweepRecent ? "No buy-side sweep" : na(eBearTop) or eBearDone ? "Waiting fresh 1M FVG" : not riskOkS ? "Stop outside limits" : not kzOk ? "Kill zone closed" : not dowOk ? "Excluded day (Tue/Fri only)" : "READY - await FVG tap"
     blockCol = str.startswith(blockTxt, "READY") ? cBull : color.new(color.orange, 0)
 
     table.cell(tb, 0, 0, "ICT NAS100", text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 25))
