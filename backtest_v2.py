@@ -11,7 +11,7 @@ Indicator logic reproduced (all Pine defaults):
   15M flowEngine  : pivot-MSS order flow + directional FVG mitigation age
   4H  flowEngine  : plain 4H market structure (neutral-bias fallback)
   1M  : MSS (mandatory) + 1M FVG that forms while aligned = armed entry zone
-  Filters: NY kill zone 09:15-12:00 ET, liquidity sweep required before every
+  Filters: NY morning session 09:30-13:00 ET, liquidity sweep required before every
            entry, 4H-structure fallback on neutral 4H bias (longs only - see
            NEUTRAL_LONG_ONLY: neutral-bias shorts backtested as a net loser).
   Plan   : entry = full fill through the 1M FVG (ENTRY_FRAC=1.0), stop beyond
@@ -43,10 +43,13 @@ MIT_MAX_AGE = 5        # 15M bars - fresh mitigation only (was 40; backtest: 46.
                        # vs 43.1%/1.47 at 40 - acting on the reaction NOW beats a stale tap)
 SWEEP_LEN = 20         # 1M bars
 REV_MAX_AGE = 60       # 1M bars (sweep freshness)
-KZ_START, KZ_END = 9 * 60 + 30, 16 * 60   # 09:30 .. 16:00 ET (full NY cash session)
-                       # widened from 09:15-12:00 for ~2x trade frequency (493 vs 253 trades)
-                       # at a modest quality cost (47.7% win/PF 1.73 vs 48.6%/1.84); narrow
-                       # back to 09:15-12:00 for the highest per-trade quality instead
+KZ_START, KZ_END = 9 * 60 + 30, 13 * 60   # 09:30 .. 13:00 ET (NY morning session)
+                       # the edge is an AM/lunch-liquidity effect: morning-only is the quality
+                       # peak (305 trades, 52.8% win, PF 2.15, avgR +0.54, -6R DD) and holds in
+                       # every year (2023 PF 2.23 / 2024 2.29 / 2025 1.91). The 13:00-16:00 block
+                       # ran at only PF 1.18 / avgR +0.10, so the full 0930-1600 session (493
+                       # trades) blends down to PF 1.73 and -8R DD. Set 14*60 for 0930-1400
+                       # (more total R, PF ~1.99) or 16*60 to reproduce the old full session.
 EOD_MIN = 16 * 60 + 59                     # force-close 16:59 ET
 SL_BUF = 2.0
 RR = 2.0
