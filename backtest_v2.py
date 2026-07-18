@@ -43,7 +43,10 @@ MIT_MAX_AGE = 5        # 15M bars - fresh mitigation only (was 40; backtest: 46.
                        # vs 43.1%/1.47 at 40 - acting on the reaction NOW beats a stale tap)
 SWEEP_LEN = 20         # 1M bars
 REV_MAX_AGE = 60       # 1M bars (sweep freshness)
-KZ_START, KZ_END = 9 * 60 + 15, 12 * 60   # 09:15 .. 12:00 ET
+KZ_START, KZ_END = 9 * 60 + 30, 16 * 60   # 09:30 .. 16:00 ET (full NY cash session)
+                       # widened from 09:15-12:00 for ~2x trade frequency (493 vs 253 trades)
+                       # at a modest quality cost (47.7% win/PF 1.73 vs 48.6%/1.84); narrow
+                       # back to 09:15-12:00 for the highest per-trade quality instead
 EOD_MIN = 16 * 60 + 59                     # force-close 16:59 ET
 SL_BUF = 2.0
 RR = 2.0

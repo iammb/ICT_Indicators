@@ -4,16 +4,19 @@
 //   4H  : FVG mitigation -> rejection -> MSS  => bias (Bullish / Bearish / Neutral)
 //   15M : order-flow direction + mitigation of the 15M FVG in the trade direction
 //   1M  : Market Structure Shift (non-negotiable) + 1M FVG as the entry trigger
-//   Extras: NY kill zone filter (09:15-12:00 ET), liquidity sweep required before
+//   Extras: NY session window (09:30-16:00 ET), liquidity sweep required before
 //           every entry, neutral-4H structure fallback (longs only - neutral-bias
 //           shorts backtested as a net loser), 55-pt max stop distance,
 //           swing-based stops with entry/SL/TP plan drawn at 2R.
 //   Win-rate tuning (backtested NQ 1-min 2022-2025): require FRESH 15M FVG
 //   mitigation (<=5 bars, not up to 40) and enter only on a FULL FILL through
 //   the 1M FVG (entryFrac=1.0, not a first-touch tap) - together these took the
-//   baseline 43.1% win / PF 1.47 to ~48% win / PF 1.84, consistent across every
-//   year and both 4H-anchoring conventions tested, with lower drawdown and equal
-//   or better total return despite fewer trades.
+//   baseline 43.1% win / PF 1.47 to ~48% win / PF 1.84 in the tight 09:15-12:00
+//   AM window, consistent across every year and both 4H-anchoring conventions
+//   tested. Session widened to the full NY cash open (09:30-16:00) for ~2x the
+//   trade frequency (493 vs 253 trades) at a modest quality cost: 47.7% win,
+//   PF 1.73. Narrow back to 09:15-12:00 in the kill-zone session input for the
+//   highest per-trade quality instead of frequency.
 // Designed to run on a 1-minute NAS100 chart. By default HTF values come from
 // CONFIRMED 4H/15M bars only (no repaint - matches the backtest) and signals
 // confirm on bar close. Signals are confluence reads, not automated trade advice.
@@ -36,11 +39,11 @@ sweepLen  = input.int(20, "Liquidity sweep lookback (chart bars)", minval = 2, g
 revMaxAge = input.int(60, "Max chart bars since sweep / 4H touch (reversals)", minval = 1, group = grpST)
 
 grpKZ = "Kill zone"
-useKZ  = input.bool(true, "Require NY kill zone (09:15-12:00 ET)", group = grpKZ)
-kzSess = input.session("0915-1200", "Kill zone session (ET)", group = grpKZ)
+useKZ  = input.bool(true, "Require NY session window (09:30-16:00 ET)", group = grpKZ, tooltip = "Backtest: the tight 09:15-12:00 AM-only window has the best per-trade quality (48.6% win, PF 1.84) but only ~1.7 trades/week. The full NY cash session (09:30-16:00, the default here) nearly doubles trade frequency (493 vs 253 trades) for a modest quality trade-off (47.7% win, PF 1.73). Going further to 24h trading roughly triples volume again but profit factor drops to 1.54 and drawdown nearly doubles - a lot of the apparent win-rate gain there is just long overnight holds getting force-closed near breakeven, not real 2R hits.")
+kzSess = input.session("0930-1600", "Kill zone session (ET)", group = grpKZ)
 showKZ = input.bool(true, "Shade kill zone", group = grpKZ)
 
-grpTP = "Trade plan (backtested: fresh mitigation + full-fill entry, ~48% win, PF 1.84)"
+grpTP = "Trade plan (backtested: fresh mitigation + full-fill entry, NY session, 47.7% win, PF 1.73)"
 useRev   = input.bool(false, "Allow neutral-bias reversal setups (lost money in backtest)", group = grpTP)
 sweepAll = input.bool(true, "Require liquidity sweep before every entry (ICT)", group = grpTP)
 neutralMode = input.string("4H structure", "When 4H bias is neutral", options = ["Stand aside", "4H structure", "15M flow"], group = grpTP, tooltip = "4H FVG bias is neutral ~40% of the time. '4H structure' falls back to plain 4H market structure direction; '15M flow' defers to the 15M order flow; 'Stand aside' takes no trades (strictest, highest PF).")
