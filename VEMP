@@ -1,0 +1,386 @@
+//@version=5
+indicator(title="NQ Combined Bias - VEMP + ICT [Table Only]", shorttitle="VEMP+ICT", overlay=true, max_lines_count=0, max_boxes_count=0, max_labels_count=0)
+
+// ---- INPUT GROUPS ------------------------------------------
+g_vemp = "VEMP Settings"
+g_ict  = "ICT Settings"
+g_disp = "Display"
+
+// ---- VEMP INPUTS -------------------------------------------
+vwap_m1       = input.float(1.0,  "VWAP Band 1 StdDev", group=g_vemp, minval=0.25, step=0.25)
+vwap_m2       = input.float(2.0,  "VWAP Band 2 StdDev", group=g_vemp, minval=0.5,  step=0.25)
+cvd_slope_len = input.int(5,      "CVD Slope Lookback", group=g_vemp, minval=2, maxval=20)
+use_cvd_div   = input.bool(true,  "Use CVD Divergence", group=g_vemp)
+div_lb        = input.int(5,      "Divergence Lookback", group=g_vemp, minval=3, maxval=20)
+ker_len       = input.int(10,     "KER Period", group=g_vemp, minval=3, maxval=30)
+ker_thresh    = input.float(0.30, "KER Min Threshold", group=g_vemp, minval=0.05, maxval=0.95, step=0.05)
+lag_gamma     = input.float(0.5,  "Laguerre Gamma", group=g_vemp, minval=0.1, maxval=0.9, step=0.05)
+lag_ob        = input.float(0.85, "Laguerre Overbought", group=g_vemp, minval=0.7, maxval=0.99, step=0.05)
+lag_os        = input.float(0.15, "Laguerre Oversold", group=g_vemp, minval=0.01, maxval=0.3, step=0.05)
+
+// ---- ICT INPUTS --------------------------------------------
+htf_tf       = input.timeframe("15", "HTF Structure TF", group=g_ict)
+struct_lb    = input.int(10, "Swing Lookback", group=g_ict, minval=3, maxval=30)
+bos_pts      = input.float(8.0, "Min BOS Size pts", group=g_ict, minval=1.0, step=1.0)
+l1_weight    = input.float(2.0, "L1 Structure Weight", group=g_ict, minval=0.5, step=0.5)
+vwap_mult1   = input.float(1.0, "VWAP Band 1", group=g_ict, minval=0.25, step=0.25)
+vwap_mult2   = input.float(2.0, "VWAP Band 2", group=g_ict, minval=0.5, step=0.25)
+l2_weight    = input.float(1.5, "L2 VWAP Weight", group=g_ict, minval=0.5, step=0.5)
+l3_weight    = input.float(1.0, "L3 Open Price Weight", group=g_ict, minval=0.5, step=0.5)
+dr_tf        = input.timeframe("60", "Dealing Range TF", group=g_ict)
+l4_weight    = input.float(1.0, "L4 Dealing Range Weight", group=g_ict, minval=0.5, step=0.5)
+ema_a        = input.int(8, "EMA Fast", group=g_ict, minval=2)
+ema_b        = input.int(21, "EMA Mid", group=g_ict, minval=5)
+ema_c        = input.int(34, "EMA Slow", group=g_ict, minval=10)
+l5_weight    = input.float(1.0, "L5 EMA Stack Weight", group=g_ict, minval=0.5, step=0.5)
+kz_lon_s     = input.int(8,  "London KZ Start (UTC hr)", group=g_ict, minval=0, maxval=23)
+kz_lon_e     = input.int(10, "London KZ End (UTC hr)", group=g_ict, minval=0, maxval=23)
+kz_ny_s      = input.int(14, "NY KZ Start (UTC hr)", group=g_ict, minval=0, maxval=23)
+kz_ny_e      = input.int(16, "NY KZ End (UTC hr)", group=g_ict, minval=0, maxval=23)
+l6_weight    = input.float(0.5, "L6 Session Weight", group=g_ict, minval=0.0, step=0.5)
+smooth_len   = input.int(3, "ICT Score Smoothing", group=g_ict, minval=1, maxval=10)
+alert_strong = input.float(4.0, "ICT Strong Bias Threshold", group=g_ict, minval=1.0, step=0.5)
+
+// ---- DISPLAY -----------------------------------------------
+show_kz_bg = input.bool(false, "Show Kill Zone background on chart", group=g_disp)
+
+// ============================================================
+//  UTILITIES
+// ============================================================
+h_utc = hour(time, "UTC")
+m_utc = minute(time, "UTC")
+
+in_lon_kz = h_utc >= kz_lon_s and h_utc < kz_lon_e
+in_ny_kz  = h_utc >= kz_ny_s  and h_utc < kz_ny_e
+in_lunch  = h_utc >= 16 and h_utc < 19
+in_lc     = h_utc == 11
+
+// ============================================================
+//  SHARED: SESSION VWAP
+// ============================================================
+var float vwap_pv  = 0.0
+var float vwap_v   = 0.0
+var float vwap_v2  = 0.0
+var int   vwap_day = 0
+var float vwap_val = na
+var float vwap_std = na
+
+cur_dv = dayofweek(time, "UTC")
+if cur_dv != vwap_day
+    vwap_pv  := 0.0
+    vwap_v   := 0.0
+    vwap_v2  := 0.0
+    vwap_day := cur_dv
+
+tp_v     = (high + low + close) / 3.0
+vwap_pv += tp_v * volume
+vwap_v  += volume
+vwap_v2 += tp_v * tp_v * volume
+
+vwap_val := vwap_v > 0 ? vwap_pv / vwap_v : close
+vwap_var  = vwap_v > 0 ? (vwap_v2 / vwap_v) - vwap_val * vwap_val : 0.0
+vwap_std := math.sqrt(math.max(vwap_var, 0.0))
+
+ict_b1u = vwap_val + vwap_std * vwap_mult1
+ict_b1d = vwap_val - vwap_std * vwap_mult1
+ict_b2u = vwap_val + vwap_std * vwap_mult2
+ict_b2d = vwap_val - vwap_std * vwap_mult2
+
+// ============================================================
+//  VEMP — MATRIX 1: VWAP
+// ============================================================
+vm1_long  = close > vwap_val
+vm1_short = close < vwap_val
+
+// ============================================================
+//  VEMP — MATRIX 2: CVD
+// ============================================================
+bar_rng     = high - low
+buy_vol_est = bar_rng > 0 ? volume * ((close - low) / bar_rng) : volume * 0.5
+delta       = buy_vol_est - (volume - buy_vol_est)
+
+var float cvd = 0.0
+cvd += delta
+
+cvd_slope      = cvd - nz(cvd[cvd_slope_len])
+m2_slope_long  = cvd_slope > 0
+m2_slope_short = cvd_slope < 0
+
+price_ll = low < ta.lowest(low, div_lb)[1]
+cvd_hl   = cvd > ta.lowest(cvd, div_lb)[1]
+bull_div = use_cvd_div and price_ll and cvd_hl
+
+price_hh = high > ta.highest(high, div_lb)[1]
+cvd_lh   = cvd  < ta.highest(cvd, div_lb)[1]
+bear_div = use_cvd_div and price_hh and cvd_lh
+
+vm2_long  = m2_slope_long  or bull_div
+vm2_short = m2_slope_short or bear_div
+
+cvd_txt = bull_div ? "BullDiv" : bear_div ? "BearDiv" : cvd_slope > 0 ? "Up" : "Down"
+
+// ============================================================
+//  VEMP — MATRIX 3: KER
+// ============================================================
+price_net  = math.abs(close - nz(close[ker_len]))
+price_path = 0.0
+for i = 1 to ker_len
+    price_path += math.abs(nz(close[i - 1]) - nz(close[i]))
+
+ker     = price_path > 0 ? price_net / price_path : 0.0
+vm3_ok  = ker >= ker_thresh
+ker_txt = vm3_ok ? "OK " + str.tostring(ker, "#.##") : "CHOP " + str.tostring(ker, "#.##")
+
+// ============================================================
+//  VEMP — MATRIX 4: LAGUERRE RSI
+// ============================================================
+g_ = lag_gamma
+var float L0 = 0.0
+var float L1 = 0.0
+var float L2 = 0.0
+var float L3 = 0.0
+
+L0 := (1.0 - g_) * close + g_ * nz(L0[1])
+L1 := -g_ * L0 + nz(L0[1]) + g_ * nz(L1[1])
+L2 := -g_ * L1 + nz(L1[1]) + g_ * nz(L2[1])
+L3 := -g_ * L2 + nz(L2[1]) + g_ * nz(L3[1])
+
+cu_ = (L0 > L1 ? L0 - L1 : 0.0) + (L1 > L2 ? L1 - L2 : 0.0) + (L2 > L3 ? L2 - L3 : 0.0)
+cd_ = (L0 < L1 ? L1 - L0 : 0.0) + (L1 < L2 ? L2 - L1 : 0.0) + (L2 < L3 ? L3 - L2 : 0.0)
+
+lag_rsi   = cu_ + cd_ != 0.0 ? cu_ / (cu_ + cd_) : 0.5
+vm4_long  = ta.crossover(lag_rsi, lag_os)
+vm4_short = ta.crossunder(lag_rsi, lag_ob)
+
+lag_txt = str.tostring(lag_rsi, "#.###") + (lag_rsi <= lag_os ? " OS" : lag_rsi >= lag_ob ? " OB" : "")
+
+// ============================================================
+//  VEMP — COMPOSITE
+// ============================================================
+vemp_long  = vm1_long  and vm2_long  and vm3_ok and vm4_long
+vemp_short = vm1_short and vm2_short and vm3_ok and vm4_short
+
+var int vemp_state = 0
+if vemp_long
+    vemp_state := 1
+if vemp_short
+    vemp_state := -1
+
+vemp_lbl = vemp_state == 1 ? "BULL" : vemp_state == -1 ? "BEAR" : "NEUTRAL"
+
+// ============================================================
+//  ICT — LAYER 1: HTF STRUCTURE
+// ============================================================
+htf_h = request.security(syminfo.tickerid, htf_tf, high,  lookahead=barmerge.lookahead_off)
+htf_l = request.security(syminfo.tickerid, htf_tf, low,   lookahead=barmerge.lookahead_off)
+htf_c = request.security(syminfo.tickerid, htf_tf, close, lookahead=barmerge.lookahead_off)
+
+htf_hh = ta.highest(htf_h, struct_lb)
+htf_ll = ta.lowest(htf_l, struct_lb)
+
+htf_bull_bos = htf_c > htf_hh[1] and (htf_hh[1] - htf_ll[1]) >= bos_pts
+htf_bear_bos = htf_c < htf_ll[1] and (htf_hh[1] - htf_ll[1]) >= bos_pts
+
+var int   struct_state = 0
+var float last_sh      = na
+var float last_sl      = na
+
+if htf_bull_bos
+    struct_state := 1
+    last_sh      := htf_hh
+if htf_bear_bos
+    struct_state := -1
+    last_sl      := htf_ll
+
+bull_choch = struct_state == 1  and not na(last_sl) and htf_c < last_sl
+bear_choch = struct_state == -1 and not na(last_sh) and htf_c > last_sh
+
+if bull_choch
+    struct_state := -1
+if bear_choch
+    struct_state := 1
+
+l1_raw     = float(struct_state)
+l1_score   = l1_raw * l1_weight
+struct_txt = struct_state == 1 ? "Bull BOS" : struct_state == -1 ? "Bear BOS" : "Neutral"
+
+// ============================================================
+//  ICT — LAYER 2: VWAP
+// ============================================================
+l2_raw   = close > ict_b2u ? -0.5 : close > ict_b1u ? 0.5 : close > vwap_val ? 1.0 : close > ict_b1d ? -1.0 : close > ict_b2d ? -0.5 : 0.5
+l2_score = l2_raw * l2_weight
+vwap_txt = (close > vwap_val ? "Above " : "Below ") + str.tostring(vwap_val, "#.0")
+
+// ============================================================
+//  ICT — LAYER 3: OPENING PRICE
+// ============================================================
+var float midnight_open = na
+var float ny_open_price = na
+var int   last_day_op   = 0
+var bool  ny_open_set   = false
+
+cur_dom = dayofmonth(time, "UTC")
+if cur_dom != last_day_op
+    midnight_open := open
+    ny_open_set   := false
+    last_day_op   := cur_dom
+
+if h_utc == 14 and m_utc == 30 and not ny_open_set
+    ny_open_price := open
+    ny_open_set   := true
+
+mid_score = na(midnight_open) ? 0.0 : close > midnight_open ? 0.5 : -0.5
+ny_score  = not ny_open_set or na(ny_open_price) ? 0.0 : close > ny_open_price ? 0.5 : -0.5
+
+l3_raw   = mid_score + ny_score
+l3_score = l3_raw * l3_weight
+open_txt = l3_raw > 0 ? "Above" : l3_raw < 0 ? "Below" : "At opens"
+
+// ============================================================
+//  ICT — LAYER 4: DEALING RANGE
+// ============================================================
+htf_h1 = request.security(syminfo.tickerid, dr_tf, high, lookahead=barmerge.lookahead_off)
+htf_l1 = request.security(syminfo.tickerid, dr_tf, low,  lookahead=barmerge.lookahead_off)
+
+dr_hi  = ta.highest(htf_h1, 5)
+dr_lo  = ta.lowest(htf_l1, 5)
+dr_mid = (dr_hi + dr_lo) / 2.0
+dr_rng = dr_hi - dr_lo
+
+ote_hi = dr_lo + dr_rng * 0.786
+ote_lo = dr_lo + dr_rng * 0.236
+
+l4_raw   = close > dr_hi * 0.99 ? -1.0 : close > ote_hi ? -0.75 : close > dr_mid ? -0.25 : close < dr_lo * 1.01 ? 1.0 : close < ote_lo ? 0.75 : close < dr_mid ? 0.25 : 0.0
+l4_score = l4_raw * l4_weight
+
+dr_pct = dr_rng > 0 ? (close - dr_lo) / dr_rng * 100.0 : 50.0
+dr_txt = (close > dr_mid ? "Premium " : "Discount ") + str.tostring(math.round(dr_pct), "#") + "%"
+
+// ============================================================
+//  ICT — LAYER 5: EMA STACK
+// ============================================================
+e_a = ta.ema(close, ema_a)
+e_b = ta.ema(close, ema_b)
+e_c = ta.ema(close, ema_c)
+
+bull_stack   = e_a > e_b and e_b > e_c
+bear_stack   = e_a < e_b and e_b < e_c
+bull_partial = (e_a > e_b or e_b > e_c) and close > e_c
+bear_partial = (e_a < e_b or e_b < e_c) and close < e_c
+
+l5_raw   = bull_stack ? 1.0 : bear_stack ? -1.0 : bull_partial ? 0.5 : bear_partial ? -0.5 : 0.0
+l5_score = l5_raw * l5_weight
+ema_txt  = bull_stack ? "Full Bull" : bear_stack ? "Full Bear" : bull_partial ? "Part Bull" : bear_partial ? "Part Bear" : "Mixed"
+
+// ============================================================
+//  ICT — LAYER 6: SESSION
+// ============================================================
+kz_mult  = in_lon_kz or in_ny_kz ? 1.0 : in_lunch ? 0.0 : in_lc ? 0.5 : 0.5
+l6_raw   = float(struct_state) * kz_mult
+l6_score = l6_raw * l6_weight
+
+// ============================================================
+//  ICT — COMPOSITE BIAS SCORE
+// ============================================================
+max_w        = l1_weight + l2_weight + l3_weight + l4_weight + l5_weight + l6_weight
+raw_total    = (l1_score + l2_score + l3_score + l4_score + l5_score + l6_score) / max_w * 10.0
+ict_bias     = ta.sma(raw_total, smooth_len)
+
+ict_bull      = ict_bias > alert_strong
+ict_bear      = ict_bias < -alert_strong
+ict_mild_bull = ict_bias > 1.0 and not ict_bull
+ict_mild_bear = ict_bias < -1.0 and not ict_bear
+
+// ============================================================
+//  COLOUR CONSTANTS
+// ============================================================
+c_bull    = color.new(#26A69A, 0)
+c_bear    = color.new(#EF5350, 0)
+c_neutral = color.new(#787B86, 0)
+c_mild_b  = color.new(#80CBC4, 0)
+c_mild_s  = color.new(#FFAB91, 0)
+c_panel   = color.new(#131722, 8)
+c_panel2  = color.new(#1B2030, 8)
+c_hero    = color.new(#0B0E16, 5)
+c_sect    = color.new(#232838, 10)
+c_hdr_bg  = color.new(#0A0E18, 0)
+c_hdr_txt = color.new(#D1D4DC, 0)
+c_lbl     = color.new(#9598A1, 0)
+c_frame   = color.new(#2A2E39, 30)
+
+v_col = vemp_state == 1 ? c_bull : vemp_state == -1 ? c_bear : c_neutral
+i_col = ict_bull ? c_bull : ict_mild_bull ? c_mild_b : ict_bear ? c_bear : ict_mild_bear ? c_mild_s : c_neutral
+
+// ---- helpers -----------------------------------------------
+arw(v) => v > 0 ? "▲" : v < 0 ? "▼" : "•"
+
+meter(score, thresh) =>
+    filled = math.min(5, math.round(math.abs(score) / thresh * 5))
+    out = ""
+    for i = 1 to 5
+        out += i <= filled ? "█" : "░"
+    out
+
+signed(v) => (v >= 0 ? "+" : "-") + str.tostring(math.abs(v), "#.0")
+
+// ============================================================
+//  OPTIONAL: Kill Zone background
+// ============================================================
+bgcolor(show_kz_bg and in_lon_kz ? color.new(color.blue, 95) : na, title="London KZ")
+bgcolor(show_kz_bg and in_ny_kz ? color.new(color.orange, 93) : na, title="NY Open KZ")
+
+// ============================================================
+//  TABLE — TOP RIGHT
+// ============================================================
+row(t, r, lbl, val, col, bg) =>
+    table.cell(t, 0, r, "  " + lbl, text_color=c_lbl, bgcolor=bg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, r, val + "  ", text_color=col, bgcolor=bg, text_size=size.tiny, text_halign=text.align_right)
+
+sect(t, r, txt) =>
+    table.cell(t, 0, r, txt, text_color=c_hdr_txt, bgcolor=c_sect, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, r, "", bgcolor=c_sect)
+
+var table dash = table.new(position.top_right, 2, 11, frame_color=c_frame, frame_width=1, border_color=c_frame, border_width=1)
+
+if barstate.islast
+    kz_now    = in_ny_kz ? "NY KZ" : in_lon_kz ? "LON KZ" : in_lunch ? "LUNCH" : "OFF-KZ"
+    kz_col    = in_ny_kz or in_lon_kz ? c_mild_b : c_neutral
+    hero_arw  = ict_bull or ict_mild_bull ? "▲ " : ict_bear or ict_mild_bear ? "▼ " : "• "
+    hero_txt  = ict_bull ? "STRONG BULL" : ict_mild_bull ? "MILD BULL" : ict_bear ? "STRONG BEAR" : ict_mild_bear ? "MILD BEAR" : "NEUTRAL"
+    c_l1      = l1_raw > 0 ? c_bull : l1_raw < 0 ? c_bear : c_neutral
+    c_l2      = l2_raw > 0 ? c_bull : l2_raw < 0 ? c_bear : c_neutral
+    c_l3      = l3_raw > 0 ? c_bull : l3_raw < 0 ? c_bear : c_neutral
+    c_l4      = l4_raw > 0 ? c_bull : l4_raw < 0 ? c_bear : c_neutral
+    c_l5      = l5_raw > 0 ? c_bull : l5_raw < 0 ? c_bear : c_neutral
+    c_vemp    = vm3_ok ? (cvd_slope > 0 ? c_bull : c_bear) : c_neutral
+
+    table.cell(dash, 0, 0, " NQ BIAS", text_color=c_hdr_txt, bgcolor=c_hdr_bg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, kz_now + " ", text_color=kz_col, bgcolor=c_hdr_bg, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(dash, 0, 1, " " + hero_arw + hero_txt, text_color=i_col, bgcolor=c_hero, text_size=size.normal, text_halign=text.align_left)
+    table.cell(dash, 1, 1, signed(ict_bias) + " ", text_color=i_col, bgcolor=c_hero, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(dash, 0, 2, " " + meter(ict_bias, alert_strong), text_color=i_col, bgcolor=c_hero, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 2, "of " + str.tostring(alert_strong, "#.#") + " ", text_color=c_lbl, bgcolor=c_hero, text_size=size.tiny, text_halign=text.align_right)
+
+    sect(dash, 3, " ICT LAYERS")
+    row(dash, 4, "Structure",   arw(l1_raw) + " " + struct_txt, c_l1, c_panel)
+    row(dash, 5, "VWAP",        arw(l2_raw) + " " + vwap_txt,   c_l2, c_panel2)
+    row(dash, 6, "Open Price",  arw(l3_raw) + " " + open_txt,   c_l3, c_panel)
+    row(dash, 7, "Dealing Rng", arw(l4_raw) + " " + dr_txt,     c_l4, c_panel2)
+    row(dash, 8, "EMA Stack",   arw(l5_raw) + " " + ema_txt,    c_l5, c_panel)
+
+    sect(dash, 9, " VEMP FILTERS")
+    row(dash, 10, "KER / CVD", ker_txt + "  |  " + cvd_txt, c_vemp, c_panel2)
+
+// ============================================================
+//  ALERTS
+// ============================================================
+alertcondition(vemp_long,  "VEMP Long",  "VEMP: All 4 matrices BULL aligned")
+alertcondition(vemp_short, "VEMP Short", "VEMP: All 4 matrices BEAR aligned")
+alertcondition(ict_bull,   "ICT Strong Bull", "ICT Bias STRONG BULL")
+alertcondition(ict_bear,   "ICT Strong Bear", "ICT Bias STRONG BEAR")
+alertcondition(vemp_long  and ict_bull, "BOTH BULL", "VEMP + ICT both BULLISH - high confidence long")
+alertcondition(vemp_short and ict_bear, "BOTH BEAR", "VEMP + ICT both BEARISH - high confidence short")
+alertcondition(in_ny_kz and vemp_long  and ict_bull, "NY BOTH BULL", "NY KZ: VEMP + ICT BULL - prime long")
+alertcondition(in_ny_kz and vemp_short and ict_bear, "NY BOTH BEAR", "NY KZ: VEMP + ICT BEAR - prime short")
