@@ -1,58 +1,176 @@
 //@version=5
-indicator("FVG + Moving Averages", overlay=true, max_boxes_count=500)
+indicator("FVG + Moving Averages + Kill Zones", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ========== INPUTS ==========
 // FVG Settings
-show_fvg = input.bool(true, "Show Fair Value Gaps", group="FVG")
-fvg_lookback = input.int(50, "FVG Display Bars", minval=10, maxval=200, group="FVG")
+show_fvg          = input.bool(true, "Show Fair Value Gaps", group="FVG")
+fvg_lookback      = input.int(50, "FVG Display Bars", minval=10, maxval=200, group="FVG")
 bullish_fvg_color = input.color(color.new(color.green, 80), "Bullish FVG Color", group="FVG")
 bearish_fvg_color = input.color(color.new(color.red, 80), "Bearish FVG Color", group="FVG")
-fvg_border_width = input.int(1, "FVG Border Width", minval=0, maxval=3, group="FVG")
-extend_fvg = input.bool(true, "Extend FVG to Current Bar", group="FVG")
+fvg_border_width  = input.int(1, "FVG Border Width", minval=0, maxval=3, group="FVG")
+extend_fvg        = input.bool(true, "Extend FVG to Current Bar", group="FVG")
 
 // EMA Settings
-show_emas = input.bool(true, "Show EMAs", group="EMAs")
-show_ema9 = input.bool(true, "Show 9 EMA", group="EMAs")
-show_ema20 = input.bool(true, "Show 20 EMA", group="EMAs")
-show_ema50 = input.bool(true, "Show 50 EMA", group="EMAs")
+show_emas   = input.bool(true, "Show EMAs", group="EMAs")
+show_ema9   = input.bool(true, "Show 9 EMA", group="EMAs")
+show_ema20  = input.bool(true, "Show 20 EMA", group="EMAs")
+show_ema50  = input.bool(true, "Show 50 EMA", group="EMAs")
 show_ema200 = input.bool(true, "Show 200 EMA", group="EMAs")
-ema9_color = input.color(color.blue, "9 EMA Color", group="EMAs")
-ema20_color = input.color(color.red, "20 EMA Color", group="EMAs")
-ema50_color = input.color(color.orange, "50 EMA Color", group="EMAs")
-ema200_color = input.color(color.black, "200 EMA Color", group="EMAs")
-ema_width = input.int(2, "EMA Line Width", minval=1, maxval=4, group="EMAs")
+ema9_color   = input.color(color.blue,   "9 EMA Color",   group="EMAs")
+ema20_color  = input.color(color.red,    "20 EMA Color",  group="EMAs")
+ema50_color  = input.color(color.orange, "50 EMA Color",  group="EMAs")
+ema200_color = input.color(color.black,  "200 EMA Color", group="EMAs")
+ema_width    = input.int(2, "EMA Line Width", minval=1, maxval=4, group="EMAs")
+
+// Kill Zone Settings
+show_kz          = input.bool(true, "Show Kill Zones", group="Kill Zones")
+kz_tz            = input.string("America/New_York", "Session Timezone", options=["America/New_York", "Europe/London", "Asia/Tokyo", "Asia/Kolkata", "GMT", "Exchange"], group="Kill Zones")
+kz_shade         = input.bool(true, "Shade Background", group="Kill Zones")
+kz_lines         = input.bool(true, "Draw Session High/Low Lines", group="Kill Zones")
+kz_labels        = input.bool(true, "Show Session Labels", group="Kill Zones")
+kz_intraday_only = input.bool(true, "Only on Intraday (<1D) Charts", group="Kill Zones")
+kz_line_width    = input.int(1, "KZ Line Width", minval=1, maxval=4, group="Kill Zones")
+kz_line_style_in = input.string("Solid", "KZ Line Style", options=["Solid", "Dashed", "Dotted"], group="Kill Zones")
+kz_extend        = input.bool(false, "Extend Lines Right", group="Kill Zones")
+
+asia_on   = input.bool(true, "Asia", group="Kill Zones", inline="asia")
+asia_sess = input.session("2000-0000", "", group="Kill Zones", inline="asia")
+asia_col  = input.color(color.new(color.yellow, 85), "", group="Kill Zones", inline="asia")
+
+lon_on    = input.bool(true, "London", group="Kill Zones", inline="lon")
+lon_sess  = input.session("0200-0500", "", group="Kill Zones", inline="lon")
+lon_col   = input.color(color.new(color.blue, 85), "", group="Kill Zones", inline="lon")
+
+ny_on     = input.bool(true, "NY AM", group="Kill Zones", inline="ny")
+ny_sess   = input.session("0830-1100", "", group="Kill Zones", inline="ny")
+ny_col    = input.color(color.new(color.green, 85), "", group="Kill Zones", inline="ny")
+
+pm_on     = input.bool(false, "NY PM", group="Kill Zones", inline="pm")
+pm_sess   = input.session("1330-1600", "", group="Kill Zones", inline="pm")
+pm_col    = input.color(color.new(color.purple, 85), "", group="Kill Zones", inline="pm")
 
 // ========== EMAs ==========
-ema9 = ta.ema(close, 9)
-ema20 = ta.ema(close, 20)
-ema50 = ta.ema(close, 50)
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
 ema200 = ta.ema(close, 200)
 
-// Plot EMAs
-plot(show_emas and show_ema9 ? ema9 : na, "EMA 9", color=ema9_color, linewidth=ema_width)
-plot(show_emas and show_ema20 ? ema20 : na, "EMA 20", color=ema20_color, linewidth=ema_width)
-plot(show_emas and show_ema50 ? ema50 : na, "EMA 50", color=ema50_color, linewidth=ema_width)
+plot(show_emas and show_ema9   ? ema9   : na, "EMA 9",   color=ema9_color,   linewidth=ema_width)
+plot(show_emas and show_ema20  ? ema20  : na, "EMA 20",  color=ema20_color,  linewidth=ema_width)
+plot(show_emas and show_ema50  ? ema50  : na, "EMA 50",  color=ema50_color,  linewidth=ema_width)
 plot(show_emas and show_ema200 ? ema200 : na, "EMA 200", color=ema200_color, linewidth=ema_width)
 
+// ========== KILL ZONES ==========
+tf_ok = not kz_intraday_only or timeframe.isintraday
+inSession(_sess) => not na(time(timeframe.period, _sess, kz_tz))
+
+in_asia = show_kz and tf_ok and asia_on and inSession(asia_sess)
+in_lon  = show_kz and tf_ok and lon_on  and inSession(lon_sess)
+in_ny   = show_kz and tf_ok and ny_on   and inSession(ny_sess)
+in_pm   = show_kz and tf_ok and pm_on   and inSession(pm_sess)
+
+bgcolor(kz_shade and in_asia ? asia_col : na, title="Asia KZ")
+bgcolor(kz_shade and in_lon  ? lon_col  : na, title="London KZ")
+bgcolor(kz_shade and in_ny   ? ny_col   : na, title="NY AM KZ")
+bgcolor(kz_shade and in_pm   ? pm_col   : na, title="NY PM KZ")
+
+kz_style = kz_line_style_in == "Dashed" ? line.style_dashed : kz_line_style_in == "Dotted" ? line.style_dotted : line.style_solid
+kz_ext   = kz_extend ? extend.right : extend.none
+
+// --- Session high/low lines (no boxes) ---
+var line  asia_hi = na
+var line  asia_lo = na
+var label asia_lb = na
+var float asia_h  = na
+var float asia_l  = na
+
+var line  lon_hi = na
+var line  lon_lo = na
+var label lon_lb = na
+var float lon_h  = na
+var float lon_l  = na
+
+var line  ny_hi = na
+var line  ny_lo = na
+var label ny_lb = na
+var float ny_h  = na
+var float ny_l  = na
+
+var line  pm_hi = na
+var line  pm_lo = na
+var label pm_lb = na
+var float pm_h  = na
+var float pm_l  = na
+
+updateLines(bool active, bool wasActive, line lhi, line llo, label llb, float hh, float ll, color col, string txt) =>
+    line  _hi = lhi
+    line  _lo = llo
+    label _lb = llb
+    float _h  = hh
+    float _l  = ll
+    if active
+        if not wasActive or na(_hi)
+            _h  := high
+            _l  := low
+            _hi := line.new(bar_index, _h, bar_index, _h, color=col, width=kz_line_width, style=kz_style, extend=kz_ext)
+            _lo := line.new(bar_index, _l, bar_index, _l, color=col, width=kz_line_width, style=kz_style, extend=kz_ext)
+            _lb := kz_labels ? label.new(bar_index, _h, txt, style=label.style_none, textcolor=col, size=size.tiny, yloc=yloc.price) : na
+        else
+            _h := math.max(_h, high)
+            _l := math.min(_l, low)
+            line.set_y1(_hi, _h)
+            line.set_y2(_hi, _h)
+            line.set_x2(_hi, bar_index)
+            line.set_y1(_lo, _l)
+            line.set_y2(_lo, _l)
+            line.set_x2(_lo, bar_index)
+            if kz_labels and not na(_lb)
+                label.set_xy(_lb, bar_index, _h)
+    [_hi, _lo, _lb, _h, _l]
+
+if kz_lines and show_kz and tf_ok
+    [a1, a2, a3, a4, a5] = updateLines(in_asia, in_asia[1], asia_hi, asia_lo, asia_lb, asia_h, asia_l, color.new(color.yellow, 20), "ASIA")
+    asia_hi := a1
+    asia_lo := a2
+    asia_lb := a3
+    asia_h  := a4
+    asia_l  := a5
+
+    [b1, b2, b3, b4, b5] = updateLines(in_lon, in_lon[1], lon_hi, lon_lo, lon_lb, lon_h, lon_l, color.new(color.blue, 20), "LONDON")
+    lon_hi := b1
+    lon_lo := b2
+    lon_lb := b3
+    lon_h  := b4
+    lon_l  := b5
+
+    [c1, c2, c3, c4, c5] = updateLines(in_ny, in_ny[1], ny_hi, ny_lo, ny_lb, ny_h, ny_l, color.new(color.green, 20), "NY AM")
+    ny_hi := c1
+    ny_lo := c2
+    ny_lb := c3
+    ny_h  := c4
+    ny_l  := c5
+
+    [d1, d2, d3, d4, d5] = updateLines(in_pm, in_pm[1], pm_hi, pm_lo, pm_lb, pm_h, pm_l, color.new(color.purple, 20), "NY PM")
+    pm_hi := d1
+    pm_lo := d2
+    pm_lb := d3
+    pm_h  := d4
+    pm_l  := d5
+
 // ========== FVG DETECTION AND DISPLAY ==========
-// Bullish FVG: gap between high[2] and low (current low > previous high[2])
-bullish_fvg = low > high[2]
-bullish_fvg_top = bullish_fvg ? low : na
+bullish_fvg        = low > high[2]
+bullish_fvg_top    = bullish_fvg ? low : na
 bullish_fvg_bottom = bullish_fvg ? high[2] : na
 
-// Bearish FVG: gap between low[2] and high (current high < previous low[2])
-bearish_fvg = high < low[2]
-bearish_fvg_top = bearish_fvg ? low[2] : na
+bearish_fvg        = high < low[2]
+bearish_fvg_top    = bearish_fvg ? low[2] : na
 bearish_fvg_bottom = bearish_fvg ? high : na
 
-// Track active FVGs and check for invalidation
-var array<box> bullish_fvg_boxes = array.new<box>()
+var array<box>   bullish_fvg_boxes   = array.new<box>()
 var array<float> bullish_fvg_bottoms = array.new<float>()
+var array<box>   bearish_fvg_boxes   = array.new<box>()
+var array<float> bearish_fvg_tops    = array.new<float>()
 
-var array<box> bearish_fvg_boxes = array.new<box>()
-var array<float> bearish_fvg_tops = array.new<float>()
-
-// Create new bullish FVG
 if show_fvg and bullish_fvg
     right_bar = extend_fvg ? bar_index + fvg_lookback : bar_index + 20
     fvg_box = box.new(bar_index - 2, bullish_fvg_bottom, right_bar, bullish_fvg_top,
@@ -66,7 +184,6 @@ if show_fvg and bullish_fvg
     array.push(bullish_fvg_boxes, fvg_box)
     array.push(bullish_fvg_bottoms, bullish_fvg_bottom)
 
-// Create new bearish FVG
 if show_fvg and bearish_fvg
     right_bar = extend_fvg ? bar_index + fvg_lookback : bar_index + 20
     fvg_box = box.new(bar_index - 2, bearish_fvg_top, right_bar, bearish_fvg_bottom,
@@ -80,7 +197,6 @@ if show_fvg and bearish_fvg
     array.push(bearish_fvg_boxes, fvg_box)
     array.push(bearish_fvg_tops, bearish_fvg_top)
 
-// Check and remove filled bullish FVGs (price closes below FVG)
 if array.size(bullish_fvg_boxes) > 0 and array.size(bullish_fvg_bottoms) > 0
     for i = array.size(bullish_fvg_boxes) - 1 to 0
         if i < array.size(bullish_fvg_bottoms)
@@ -90,7 +206,6 @@ if array.size(bullish_fvg_boxes) > 0 and array.size(bullish_fvg_bottoms) > 0
                 array.remove(bullish_fvg_boxes, i)
                 array.remove(bullish_fvg_bottoms, i)
 
-// Check and remove filled bearish FVGs (price closes above FVG)
 if array.size(bearish_fvg_boxes) > 0 and array.size(bearish_fvg_tops) > 0
     for i = array.size(bearish_fvg_boxes) - 1 to 0
         if i < array.size(bearish_fvg_tops)
